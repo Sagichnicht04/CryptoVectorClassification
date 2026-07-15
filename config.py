@@ -1,0 +1,54 @@
+
+## Steps
+PREPARE_DATA = False
+CHUNK_DATA = False
+BASE_EMBED_CHUNKS = True
+TRAIN_DIRTY_CLASSIFIER = True
+CLASSIFY_CHUNKS = True
+FINETUNE_MODEL = True
+FINETUNED_EMBED_CHUNKS = True
+TRAIN_FINETUNED_CLASSIFIER = True
+EVALUATE_CLASSIFIER = True
+
+
+
+# Add models from Hugging Face or local paths.
+# For local models, provide the absolute path to the model directory.
+MODELS = [
+    "microsoft/codebert-base",
+    "Qwen/Qwen2.5-Coder-14B",
+    "Qwen/Qwen2.5-Coder-14B-Instruct",
+    "bigcode/starcoder2-15b",
+    "Qwen/Qwen2.5-14B-Instruct",
+    "Qwen/Qwen2.5-7B-Instruct",
+    "arcee-ai/SuperNova-Medius",
+    "deepseek-ai/deepseek-coder-6.7b-instruct",
+    "microsoft/codebert-base-text",  # Example of a local fine-tuned model
+    "microsoft/codebert-base-graph",
+    "microsoft/codebert-base-math"
+]
+
+# The pre-trained model to use from Hugging Face
+MODEL_NAME = MODELS[0]
+
+# Either neural_network_binary_classifier or random_forest_classifier
+CLASSIFIER = "neural_network_binary_classifier"
+
+# Either graph or text
+REPRESENTATION = "graph"
+
+#2**12 = 4096
+#TOKEN_SIZE = 2**12
+TOKEN_SIZE = 512
+OVERLAP = 128
+
+NUM_EVAL_FILES = 50
+NUM_TRAIN_FILES = 500
+
+USE_MODIFIED_FILES = False
+
+# The classification threshold for detecting crypto files.
+CLASSIFIER_THRESHOLD = 0.75
+
+
+INTERPRETER = "venv/bin/python3"
