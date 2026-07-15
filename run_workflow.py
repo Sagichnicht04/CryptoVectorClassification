@@ -68,13 +68,39 @@ if config.CHUNK_DATA:
         print(f"\rProcessed: {file_counter*100/len(all_files)}%", end="", flush=True)
 
 
-    torch.save(chunks, "chunks.pt")
+    torch.save(chunks, f"{config.REPRESENTATION}_chunks.pt")
     print(f"Saved chunks for {len(chunks)} files to disk ({chunk_counter} chunks)")
 
 else:
-    chunks = torch.load("chunks.pt")
-    for file in chunks.keys():
+    chunks = torch.load(f"{config.REPRESENTATION}_chunks.pt")
+    for file in chunks:
         if not os.path.exists(file):
             print("Fatal: Path of cached chunk file does not exist")
             exit()
     print("Loaded Cached Chunks from Disk")
+
+
+print("-- Step 3: Base Embed Chunks --")
+base_embedded_chunks = {}
+if config.BASE_EMBED_CHUNKS:
+    file_counter = 0
+    for file in chunks:
+        embedding_counter = 0
+        file_counter += 1
+        base_embedded_chunks[file] = []
+        print(f"Embedding file {file} ({file_counter}/{len(chunks)})")
+        for chunk in chunks[file]:
+            base_embedded_chunks[file].append(base_embedding.get_embedding(chunk))
+            embedding_counter += 1
+            print(f"\rProcessing {len(chunks[file])} chunks. Progress: {embedding_counter}", end="", flush=True)
+        print()
+            
+    torch.save(base_embedded_chunks, f"{config.REPRESENTATION}_base_embeddings.pt")
+    print(f"Saved embeddings for {len(base_embedded_chunks)} files to disk ({embedding_counter} embeddings)")
+else:
+    base_embedded_chunks = torch.load(f"{config.REPRESENTATION}_base_embeddings.pt")
+    for file in base_embedded_chunks:
+        if not os.path.exists(file):
+            print("Fatal: Path of cached embedding file does not exist")
+            exit()
+    print("Loaded Cached Embeddings from Disk")

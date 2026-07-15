@@ -72,32 +72,6 @@ class embedding_model:
 
 
 
-def _load_snippets_from_dir(directory, limit=config.NUM_TRAIN_FILES):
-    """Generator that yields (language, code) from a directory of files recursively, up to a limit."""
-    if not os.path.exists(directory):
-        return
-    all_filepaths = []
-    for root, _, files in os.walk(directory):
-        for filename in files:
-            path = os.path.join(root, filename)
-            lang = get_lang_from_path(path)
-            if lang:
-                all_filepaths.append((path, lang))
-                
-    # Use deterministic shuffle to sample diverse files
-    import random
-    state = random.getstate()
-    random.seed(42)
-    random.shuffle(all_filepaths)
-    random.setstate(state)
-    
-    if limit is not None:
-        all_filepaths = all_filepaths[:limit]
-        
-    for path, lang in sorted(all_filepaths):
-        with open(path, 'r', errors='ignore') as f:
-            yield (lang, f.read())
-
 
 def embed_dataset(model, tokenizer):
     """
