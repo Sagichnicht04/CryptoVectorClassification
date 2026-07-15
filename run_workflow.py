@@ -4,7 +4,7 @@ from  embedding import embedding_model
 from graph_representation import standardize_graph_representation, get_lang_from_path
 import os
 import torch
-
+from classifier import get_classifier
 
 print("-- Step 1: Preparing Data --")
 if config.PREPARE_DATA:
@@ -68,11 +68,11 @@ if config.CHUNK_DATA:
         print(f"\rProcessed: {file_counter*100/len(all_files)}%", end="", flush=True)
 
 
-    torch.save(chunks, f"{config.REPRESENTATION}_chunks.pt")
+    torch.save(chunks, config.CHUNKS_PATH)
     print(f"Saved chunks for {len(chunks)} files to disk ({chunk_counter} chunks)")
 
 else:
-    chunks = torch.load(f"{config.REPRESENTATION}_chunks.pt")
+    chunks = torch.load(config.CHUNKS_PATH)
     for file in chunks:
         if not os.path.exists(file):
             print("Fatal: Path of cached chunk file does not exist")
@@ -95,12 +95,50 @@ if config.BASE_EMBED_CHUNKS:
             print(f"\rProcessing {len(chunks[file])} chunks. Progress: {embedding_counter}", end="", flush=True)
         print()
             
-    torch.save(base_embedded_chunks, f"{config.REPRESENTATION}_base_embeddings.pt")
-    print(f"Saved embeddings for {len(base_embedded_chunks)} files to disk ({embedding_counter} embeddings)")
+    torch.save(base_embedded_chunks, config.BASE_EMBEDDINGS_PATH)
+    print(f"Saved embeddings for {len(base_embedded_chunks)} files to disk")
 else:
-    base_embedded_chunks = torch.load(f"{config.REPRESENTATION}_base_embeddings.pt")
+    base_embedded_chunks = torch.load(config.BASE_EMBEDDINGS_PATH)
     for file in base_embedded_chunks:
         if not os.path.exists(file):
             print("Fatal: Path of cached embedding file does not exist")
             exit()
     print("Loaded Cached Embeddings from Disk")
+
+
+print("-- Step 4: Train dirty Classifier --")
+dirty_classifier = get_classifier(config.DIRTY_CLASSIFIER_PATH)
+if config.TRAIN_DIRTY_CLASSIFIER:
+    crypto_embeddings = []
+    non_crypto_embeddings = []
+
+    for file in base_embedded_chunks:
+        if "data/training/crypto" in file:
+            crypto_embeddings.append(base_embedded_chunks[file])
+        elif "data/training/non_crypto" in file:
+            non_crypto_embeddings.append(base_embedded_chunks[file])
+    dirty_classifier.train(crypto_embeddings, non_crypto_embeddings)
+else:
+    dirty_classifier.load()
+
+print("-- Step 5: Classify Chunks --")
+if config.CLASSIFY_CHUNKS:
+    detected_crypto_chunks = []
+    embedding_counter = 0
+    for file in base_embedded_chunks:
+        if "data/training/crypto" in file:
+            probabilities = dirty_classifier.predict_proba(base_embedded_chunks[file])
+            for index, probability in enumerate(probabilities):
+                embedding_counter += 1
+                if probability[1] > config.CLASSIFIER_THRESHOLD:
+                    detected_crypto_chunks.append(base_embedded_chunks[file][index])
+
+    print(f"Predicted {len(detected_crypto_chunks)} crypto chunks out of {embedding_counter} chunks in crypto files")
+    torch.save(detected_crypto_chunks, config.CHUNK_CLASSIFICATION_PATH)
+    print(f"Saved predictions to disk")
+else:
+    detected_crypto_chunks = torch.load(config.CHUNK_CLASSIFICATION_PATH)
+    if len(detected_crypto_chunks) == 0:
+        print("Fatal: Empty Crypto Chunk Classification File")
+        exit()
+    print("Loaded Cached Chunk Classifications from Disk")
