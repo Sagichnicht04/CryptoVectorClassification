@@ -33,7 +33,7 @@ MODELS = [
 MODEL_NAME = MODELS[0]
 
 # Either neural_network_binary_classifier or random_forest_classifier
-CLASSIFIER = "random_forest_classifier"
+CLASSIFIER = "neural_network_binary_classifier"
 
 # Either graph or text
 REPRESENTATION = "graph"
