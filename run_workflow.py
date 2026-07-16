@@ -6,9 +6,10 @@ import os
 import torch
 from classifier import get_classifier
 import random
+import json
 
-
-base_embedding = embedding_model(config.MODEL_NAME)
+if config.CHUNK_DATA or config.BASE_EMBED_CHUNKS or config.FINETUNE_MODEL:
+    base_embedding = embedding_model(config.MODEL_NAME)
 
 
 print("-- Step 1: Preparing Data --")
@@ -106,12 +107,13 @@ if config.BASE_EMBED_CHUNKS:
     torch.save(base_embedded_chunks, config.BASE_EMBEDDINGS_PATH)
     print(f"Saved embeddings for {len(base_embedded_chunks)} files to disk")
 else:
-    base_embedded_chunks = torch.load(config.BASE_EMBEDDINGS_PATH,weights_only=False)
-    for file in base_embedded_chunks:
-        if not os.path.exists(file):
-            print("Fatal: Path of cached embedding file does not exist")
-            exit()
-    print("Loaded Cached Embeddings from Disk")
+    if config.TRAIN_DIRTY_CLASSIFIER or config.CLASSIFY_CHUNKS or config.FINETUNE_MODEL:
+        base_embedded_chunks = torch.load(config.BASE_EMBEDDINGS_PATH,weights_only=False)
+        for file in base_embedded_chunks:
+            if not os.path.exists(file):
+                print("Fatal: Path of cached embedding file does not exist")
+                exit()
+        print("Loaded Cached Embeddings from Disk")
 
 l = list(base_embedded_chunks.items())
 random.shuffle(l)
@@ -133,7 +135,8 @@ if config.TRAIN_DIRTY_CLASSIFIER:
                 non_crypto_embeddings.append(chunk["embedding"])
     dirty_classifier.train(crypto_embeddings, non_crypto_embeddings)
 else:
-    dirty_classifier.load()
+    if config.CLASSIFY_CHUNKS:
+        dirty_classifier.load()
 
 print("-- Step 5: Classify Chunks --")
 if config.CLASSIFY_CHUNKS:
@@ -213,8 +216,8 @@ if config.FINETUNE_MODEL:
 else:
     print("Skipped")
 
-del base_embedding
-fine_tuned_embedding = embedding_model(config.FINE_TUNED_MODEL_DIR)
+if config.FINETUNED_EMBED_CHUNKS or config.EVALUATE_CLASSIFIER:
+    fine_tuned_embedding = embedding_model(config.FINE_TUNED_MODEL_DIR)
 
 print("-- Step 7: Fine Tuned Embed Chunks --")
 fine_tuned_embedded_chunks = {}
@@ -269,9 +272,9 @@ else:
 
 print("-- Step 9: Evaluate Classifier --")
 if config.EVALUATE_CLASSIFIER:
-    crypto_embeddings = []
-    non_crypto_embeddings = []
-    discarded_crypto_embeddings = []
+    crypto_embeddings = {}
+    non_crypto_embeddings = {}
+    discarded_crypto_embeddings = {}
 
     for file in fine_tuned_embedded_chunks:
         embeddings = []
@@ -282,29 +285,40 @@ if config.EVALUATE_CLASSIFIER:
 
         probabilities = fine_tuned_classifier.predict_proba(embeddings)
                 
+    
         if "data/evaluation/novel_crypto" in file:
+            crypto_embeddings[file] = [] 
             for index, probability in enumerate(probabilities):
-                crypto_embeddings.append({
-                    "file": file,
-                    "chunk_tokens": chunk_tokens[index],
-                    "probability": probability,
+                crypto_embeddings[file].append({
+                    "probability": probability[1],
+                    "clear_text": fine_tuned_embedding.decode(chunk_tokens[index]["input_ids"])
                 })
-
-        if "data/evaluation/non_crypto/discarded_dataset" in file:
-            for index, probability in enumerate(probabilities):
-                discarded_crypto_embeddings.append({
-                    "file": file,
-                    "chunk_tokens": chunk_tokens[index],
-                    "probability": probability,
-                })
+                
 
         if "data/evaluation/non_crypto/non_crypto_dataset" in file:
+            non_crypto_embeddings[file] = [] 
             for index, probability in enumerate(probabilities):
-                non_crypto_embeddings.append({
-                    "file": file,
-                    "chunk_tokens": chunk_tokens[index],
-                    "probability": probability,
+                non_crypto_embeddings[file].append({
+                    "probability": probability[1],
+                    "clear_text": fine_tuned_embedding.decode(chunk_tokens[index]["input_ids"])
                 })
+                
+        if "data/evaluation/non_crypto/discarded_dataset" in file:
+            discarded_crypto_embeddings[file] = [] 
+            for index, probability in enumerate(probabilities):
+                discarded_crypto_embeddings[file].append({
+                    "probability": probability[1],
+                    "clear_text": fine_tuned_embedding.decode(chunk_tokens[index]["input_ids"])
+                })
+
+    os.makedirs(config.EVALUATION_RESULT_PATH, exist_ok=True)
+
+    with open(f"{config.EVALUATION_RESULT_PATH}crypto_results", "w") as f:
+        json.dump(crypto_embeddings, f)
+    with open(f"{config.EVALUATION_RESULT_PATH}non_crypto_results", "w") as f:
+        json.dump(non_crypto_embeddings, f)
+    with open(f"{config.EVALUATION_RESULT_PATH}api_crypto_results", "w") as f:
+        json.dump(discarded_crypto_embeddings, f)
 
     print(f"Predicted {len(detected_crypto_chunks)} crypto chunks out of  chunks in crypto files")
     torch.save(detected_crypto_chunks, config.CHUNK_CLASSIFICATION_PATH)

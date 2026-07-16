@@ -70,27 +70,6 @@ class RandomForestClassifier:
             self.model = pickle.load(f)
         return True
 
-    def predict(self, embeddings: list) -> tuple[bool, float]:
-        """
-        Returns (is_crypto, max_crypto_probability).
-        is_crypto is True when max P(crypto) >= CLASSIFIER_THRESHOLD.
-        """
-        if self.model is None:
-            raise RuntimeError("RandomForestClassifier has not been trained/loaded.")
-        
-        if not embeddings:
-            return False, 0.0
-        
-        # Get probability for each chunk
-        probas = self.model.predict_proba(np.vstack(embeddings))
-        
-        # Use the max probability of any chunk as the file's probability
-        max_proba = float(np.max(probas[:, 1]))
-        
-        threshold = getattr(config, 'CLASSIFIER_THRESHOLD', 0.25)
-        is_crypto = max_proba >= threshold
-        return is_crypto, max_proba
-
     # ------------------------------------------------------------------
     def predict_proba(self, embeddings: list) -> np.ndarray:
         """
