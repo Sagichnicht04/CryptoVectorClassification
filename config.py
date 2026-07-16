@@ -25,11 +25,12 @@ MODELS = [
     "deepseek-ai/deepseek-coder-6.7b-instruct",
     "microsoft/codebert-base-text",  # Example of a local fine-tuned model
     "microsoft/codebert-base-graph",
-    "microsoft/codebert-base-math"
+    "microsoft/codebert-base-math",
+    "/home/flo/codebert-local",
 ]
 
 # The pre-trained model to use from Hugging Face
-MODEL_NAME = MODELS[0]
+MODEL_NAME = MODELS[11]
 
 # Either neural_network_binary_classifier or random_forest_classifier
 CLASSIFIER = "neural_network_binary_classifier"

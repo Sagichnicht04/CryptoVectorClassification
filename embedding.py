@@ -4,9 +4,12 @@ import json
 import torch
 from transformers import AutoTokenizer, AutoModel
 import config
+import torch.nn as nn
+import torch.optim as optim
 
 os.environ["HF_HOME"] = os.path.join(os.getcwd(), "hf_cache")
 os.environ["TRANSFORMERS_CACHE"] = os.path.join(os.getcwd(), "hf_cache", "transformers")
+os.environ["HF_HUB_OFFLINE"] = "1"
 
 def get_lang_from_path(path):
     if path.endswith('.py'): return 'python'
@@ -19,16 +22,25 @@ def get_lang_from_path(path):
 class embedding_model:
 
     def __init__(self, model_dir):
-        self.TOKENIZER = AutoTokenizer.from_pretrained(model_dir)
+        self.TOKENIZER = AutoTokenizer.from_pretrained(
+            model_dir,
+            local_files_only=True
+            )
 
         self.MODEL = AutoModel.from_pretrained(
             model_dir,
             use_safetensors=True,
             #torch_dtype=torch.float16,
             torch_dtype="auto",
+            local_files_only=True
         ).cuda()
 
         self.DEVICE = torch.device("cuda")
+
+        self.OPTIMIZER = optim.Adam(
+            self.MODEL.parameters(),
+            lr=1e-5
+        )
 
 
     def tokenize(self, text):
@@ -38,6 +50,13 @@ class embedding_model:
             padding=False,
             truncation=False
         )
+    
+    def decode(self, input_ids):
+        text = self.TOKENIZER.decode(
+            input_ids,
+            skip_special_tokens=True
+        )
+        return text
 
     def get_embedding(self, chunk):
 
@@ -65,123 +84,45 @@ class embedding_model:
                 embedding = sum_hidden / sum_mask
 
 
-            return embedding.to(torch.float32).cpu().numpy()
+            return chunk_tokens, embedding.to(torch.float32).cpu().numpy()
 
 
-        
+    def finetune(self, dataset):
+        triplet_loss = nn.TripletMarginLoss(margin=0.5)
 
 
+        anchor_ids = dataset["anchor_ids"].to(self.DEVICE)
+        anchor_mask = dataset["anchor_mask"].to(self.DEVICE)
 
+        positive_ids = dataset["positive_ids"].to(self.DEVICE)
+        positive_mask = dataset["positive_mask"].to(self.DEVICE)
 
-def embed_dataset(model, tokenizer):
-    """
-    Embeds a dataset of source files based on the settings in config.py.
+        negative_ids = dataset["negative_ids"].to(self.DEVICE)
+        negative_mask = dataset["negative_mask"].to(self.DEVICE)
 
-    Saves:
-      - FAISS index  (config.INDEX_PATH)         – crypto embeddings only
-      - file map     (config.MAP_PATH)            – paths for indexed files
-      - labeled npz  (config.RF_EMBEDDINGS_PATH) – crypto=1 + non-crypto=0
-    """
-    print("--- Embedding Dataset ---")
+        self.OPTIMIZER.zero_grad()
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    model.to(device)
-    model.eval()
+        anchor_emb = self.MODEL(
+            input_ids=anchor_ids,
+            attention_mask=anchor_mask
+        )
 
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
+        positive_emb = self.MODEL(
+            input_ids=positive_ids,
+            attention_mask=positive_mask
+        )
 
-    lang_ext_map = {
-        "python": [".py"],
-        "c": [".c", ".h"],
-        "cpp": [".cpp", ".hpp", ".hh", ".cc", ".cxx"],
-        "java": [".java"]
-    }
-    extensions = tuple([ext for lang in config.LANGUAGES for ext in lang_ext_map.get(lang, [])])
+        negative_emb = self.MODEL(
+            input_ids=negative_ids,
+            attention_mask=negative_mask
+        )
 
-    all_files = []
-    for root, _, files in os.walk("data/training/crypto"):
-        for file in files:
-            if file.endswith(extensions):
-                all_files.append(os.path.join(root, file))
-    
-    import random
-    all_files.sort()
-    random.seed(42)
-    random.shuffle(all_files)
-    all_files = all_files[:config.NUM_TRAIN_FILES]
-    print(f"Sampling {len(all_files)} files to process for languages: {config.LANGUAGES}")
+        loss = triplet_loss(
+            anchor_emb,
+            positive_emb,
+            negative_emb
+        )
 
-    D = model.config.hidden_size
-    # FAISS index is no longer used with chunking
-    # index = faiss.IndexFlatIP(D)
+        loss.backward()
+        self.OPTIMIZER.step()
 
-    successful_file_paths = []
-    problematic_files = []
-    all_embeddings = []
-    all_labels = []
-
-    with torch.no_grad():
-        # --- 1. Crypto dataset files (label=1) ---
-        for i, file_path in enumerate(all_files):
-            print(f"Processing file {i+1}/{len(all_files)}: {file_path}")
-            try:
-                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-                    content = f.read()
-                if not content.strip():
-                    print("  - SKIPPED (empty file)")
-                    continue
-                lang = get_lang_from_path(file_path)
-                emb = _embed_code(content, lang, tokenizer, model, device)
-                if not emb:
-                    problematic_files.append((file_path, f"Could not generate {config.INPUT_TYPE} representation."))
-                    print("  - FAILED (Representation generation error)")
-                    continue
-                
-                # With chunking, emb is a list of embeddings
-                all_embeddings.append(emb)
-                all_labels.append(1)
-                successful_file_paths.append(file_path)
-                print(f"  - SUCCESS (generated {len(emb)} chunks)")
-            except Exception as e:
-                problematic_files.append((file_path, str(e)))
-                print(f"  - FAILED (Exception: {e})")
-
-
-        # --- 3. Non-crypto snippets (label=0) ---
-        print("\n--- Embedding non-crypto training snippets ---")
-        neg_count = 0
-        for lang, code in _load_snippets_from_dir("data/training/non_crypto"):
-            emb = _embed_code(code, lang, tokenizer, model, device)
-            if emb:
-                all_embeddings.append(emb)
-                all_labels.append(0)
-                neg_count += 1
-        print(f"  Non-crypto snippets embedded: {neg_count}")
-
-    # --- Save paths for RF embeddings ---
-    print("\n--------------------")
-    print("Processing complete.")
-    print(f"Saving file map to '{config.MAP_PATH}'...")
-    with open(config.MAP_PATH, "w") as f:
-        json.dump(successful_file_paths, f)
-    print("Save complete.")
-
-    # --- Save labeled embeddings for RF ---
-    if all_embeddings:
-        # Save as an object array since the inner lists can have different lengths
-        np.savez(config.RF_EMBEDDINGS_PATH, embeddings=np.array(all_embeddings, dtype=object), labels=np.array(all_labels))
-        n_c = int(sum(all_labels))
-        n_nc = len(all_labels) - n_c
-        print(f"Labeled embeddings saved to '{config.RF_EMBEDDINGS_PATH}' ({n_c} crypto, {n_nc} non-crypto).")
-
-    if problematic_files:
-        print(f"\nFailed to process: {len(problematic_files)} files.")
-        with open("problematic_files_log.txt", "w") as f:
-            for path, reason in problematic_files:
-                f.write(f"{path} - {reason}\n")
-        print("Log saved to 'problematic_files_log.txt'")
-
-if __name__ == "__main__":
-    pass

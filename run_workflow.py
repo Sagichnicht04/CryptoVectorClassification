@@ -5,6 +5,11 @@ from graph_representation import standardize_graph_representation, get_lang_from
 import os
 import torch
 from classifier import get_classifier
+import random
+
+
+base_embedding = embedding_model(config.MODEL_NAME)
+
 
 print("-- Step 1: Preparing Data --")
 if config.PREPARE_DATA:
@@ -15,7 +20,6 @@ if config.PREPARE_DATA:
 else:
     print("Skipped")
 
-base_embedding = embedding_model(config.MODEL_NAME)
 
 print("-- Step 2: Chunk Data --")
 chunks = {}
@@ -88,11 +92,16 @@ if config.BASE_EMBED_CHUNKS:
         embedding_counter = 0
         file_counter += 1
         base_embedded_chunks[file] = []
-        print(f"Embedding file {file} ({file_counter}/{len(chunks)})")
         for chunk in chunks[file]:
-            base_embedded_chunks[file].append(base_embedding.get_embedding(chunk))
+            chunk_tokens, embedding = base_embedding.get_embedding(chunk)
+            base_embedded_chunks[file].append({
+                "chunk_tokens":chunk_tokens,
+                "embedding": embedding
+            })
             embedding_counter += 1
-            print(f"\rProcessing {len(chunks[file])} chunks. Progress: {embedding_counter}", end="", flush=True)
+            print(f"\rEmbedding file {file} ({file_counter}/{len(chunks)}) | Chunk {embedding_counter}/{len(chunks[file])} | ", end="", flush=True,
+            )
+
         print()
             
     torch.save(base_embedded_chunks, config.BASE_EMBEDDINGS_PATH)
@@ -114,9 +123,11 @@ if config.TRAIN_DIRTY_CLASSIFIER:
 
     for file in base_embedded_chunks:
         if "data/training/crypto" in file:
-            crypto_embeddings.append(base_embedded_chunks[file])
+            for chunk in base_embedded_chunks[file]:
+                crypto_embeddings.append(chunk["embedding"])
         elif "data/training/non_crypto" in file:
-            non_crypto_embeddings.append(base_embedded_chunks[file])
+            for chunk in base_embedded_chunks[file]:
+                non_crypto_embeddings.append(chunk["embedding"])
     dirty_classifier.train(crypto_embeddings, non_crypto_embeddings)
 else:
     dirty_classifier.load()
@@ -125,14 +136,28 @@ print("-- Step 5: Classify Chunks --")
 if config.CLASSIFY_CHUNKS:
     detected_crypto_chunks = []
     embedding_counter = 0
+    different_files = []
+    files_sum = 0
     for file in base_embedded_chunks:
         if "data/training/crypto" in file:
-            probabilities = dirty_classifier.predict_proba(base_embedded_chunks[file])
+            files_sum += 1
+            embeddings = []
+            chunk_tokens = []
+            for chunk in base_embedded_chunks[file]:
+                embeddings.append(chunk["embedding"])
+                chunk_tokens.append(chunk["chunk_tokens"])
+
+            probabilities = dirty_classifier.predict_proba(embeddings)
             for index, probability in enumerate(probabilities):
                 embedding_counter += 1
                 if probability[1] > config.CLASSIFIER_THRESHOLD:
-                    detected_crypto_chunks.append(base_embedded_chunks[file][index])
-
+                    different_files.append(file)
+                    detected_crypto_chunks.append({
+                        "file": file,
+                        "chunk_tokens": chunk_tokens[index],
+                    })
+    different_files = list(set(different_files))
+    print(f"Using {len(different_files)}/{files_sum} crypto files")
     print(f"Predicted {len(detected_crypto_chunks)} crypto chunks out of {embedding_counter} chunks in crypto files")
     torch.save(detected_crypto_chunks, config.CHUNK_CLASSIFICATION_PATH)
     print(f"Saved predictions to disk")
@@ -142,3 +167,42 @@ else:
         print("Fatal: Empty Crypto Chunk Classification File")
         exit()
     print("Loaded Cached Chunk Classifications from Disk")
+
+
+print("-- Step 6: Finetuning Model --")
+if config.FINETUNE_MODEL:
+    dataset = {
+        "anchor_ids" : [],
+        "anchor_mask" : [],
+        "positive_ids" : [],
+        "positive_mask" : [],
+        "negative_ids" : [],
+        "negative_mask" : [],
+    }
+
+    for i, crypto_chunk in enumerate(detected_crypto_chunks):
+        dataset["anchor_ids"].append(crypto_chunk["chunk_tokens"]["input_ids"])
+        dataset["anchor_mask"].append(crypto_chunk["chunk_tokens"]["attention_mask"])
+
+        positive_idx = random.randrange(len(detected_crypto_chunks) - 1)
+        if positive_idx >= i:
+            positive_idx += 1
+
+        positive_chunk = detected_crypto_chunks[positive_idx]
+
+        dataset["positive_ids"].append(
+            positive_chunk["chunk_tokens"]["input_ids"]
+        )
+        dataset["positive_mask"].append(
+            positive_chunk["chunk_tokens"]["attention_mask"]
+        )
+
+    for file in base_embedded_chunks:
+        if len(dataset["anchor_ids"]) < len(dataset["negative_ids"]) and "data/training/non_crypto" in file:
+            for non_crypto_chunk in base_embedded_chunks[file]:
+                dataset["negative_ids"].append(non_crypto_chunk["chunk_tokens"]["input_ids"])
+                dataset["negative_mask"].append(non_crypto_chunk["chunk_tokens"]["attention_mask"])
+    base_embedding.finetune(dataset)
+    print(f"Fine Tuned model with {len(dataset["anchor_ids"])} anchors, {len(dataset["positive_ids"])} positives and {len(dataset["negative_ids"])} negatives")
+else:
+    print("Skipped")
