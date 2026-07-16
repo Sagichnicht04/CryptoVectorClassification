@@ -4,3 +4,4 @@ venv/
 *.pt
 __pycache__
 *.pkl
+*_fine_tuned/

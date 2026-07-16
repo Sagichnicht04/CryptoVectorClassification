@@ -188,30 +188,13 @@ class BCEClassifier:
     def load(self) -> bool:
         if not os.path.exists(self.path):
             return False
-        state_dict = torch.load(self.path, map_location=self.device)
+        state_dict = torch.load(self.path, map_location=self.device, weights_only=False)
         input_dim = state_dict['linear.weight'].shape[1]
         self.model = BCEClassifierModule(input_dim).to(self.device)
         self.model.load_state_dict(state_dict)
         self.model.eval()
         return True
 
-    def predict(self, embeddings: list) -> tuple[bool, float]:
-        """
-        Returns (is_crypto, max_crypto_probability).
-        is_crypto is True when max P(crypto) >= CLASSIFIER_THRESHOLD.
-        """
-        if self.model is None:
-            raise RuntimeError("BCEClassifier has not been trained/loaded.")
-        
-        if not embeddings:
-            return False, 0.0
-
-        probas = self.predict_proba(embeddings)
-        max_proba = float(np.max(probas[:, 1]))
-        
-        threshold = getattr(config, 'CLASSIFIER_THRESHOLD', 0.75)
-        is_crypto = max_proba >= threshold
-        return is_crypto, max_proba
 
     def predict_proba(self, embeddings: list) -> np.ndarray:
         """

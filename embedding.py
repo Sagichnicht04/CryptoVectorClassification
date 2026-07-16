@@ -2,6 +2,7 @@ import os
 import numpy as np
 import json
 import torch
+import torch.amp
 from transformers import AutoTokenizer, AutoModel
 import config
 import torch.nn as nn
@@ -34,6 +35,9 @@ class embedding_model:
             torch_dtype="auto",
             local_files_only=True
         ).cuda()
+
+        # Enable gradient checkpointing to save VRAM
+        self.MODEL.gradient_checkpointing_enable()
 
         self.DEVICE = torch.device("cuda")
 
@@ -87,42 +91,69 @@ class embedding_model:
             return chunk_tokens, embedding.to(torch.float32).cpu().numpy()
 
 
-    def finetune(self, dataset):
+    def finetune(self, dataset, batch_size=4):
         triplet_loss = nn.TripletMarginLoss(margin=0.5)
 
+        anchor_ids_all = torch.cat(dataset["anchor_ids"], dim=0)
+        anchor_mask_all = torch.cat(dataset["anchor_mask"], dim=0)
 
-        anchor_ids = dataset["anchor_ids"].to(self.DEVICE)
-        anchor_mask = dataset["anchor_mask"].to(self.DEVICE)
+        positive_ids_all = torch.cat(dataset["positive_ids"], dim=0)
+        positive_mask_all = torch.cat(dataset["positive_mask"], dim=0)
 
-        positive_ids = dataset["positive_ids"].to(self.DEVICE)
-        positive_mask = dataset["positive_mask"].to(self.DEVICE)
+        negative_ids_all = torch.cat(dataset["negative_ids"], dim=0)
+        negative_mask_all = torch.cat(dataset["negative_mask"], dim=0)
 
-        negative_ids = dataset["negative_ids"].to(self.DEVICE)
-        negative_mask = dataset["negative_mask"].to(self.DEVICE)
+        for i in range(0, len(anchor_ids_all), batch_size):
+            # Slice current batch
+            anchor_ids = anchor_ids_all[i:i + batch_size].to(self.DEVICE)
+            anchor_mask = anchor_mask_all[i:i + batch_size].to(self.DEVICE)
 
-        self.OPTIMIZER.zero_grad()
+            positive_ids = positive_ids_all[i:i + batch_size].to(self.DEVICE)
+            positive_mask = positive_mask_all[i:i + batch_size].to(self.DEVICE)
 
-        anchor_emb = self.MODEL(
-            input_ids=anchor_ids,
-            attention_mask=anchor_mask
-        )
+            # Slicing safely with negative ids in case sizes differ by 1
+            negative_ids = negative_ids_all[i:i + batch_size].to(self.DEVICE)
+            negative_mask = negative_mask_all[i:i + batch_size].to(self.DEVICE)
 
-        positive_emb = self.MODEL(
-            input_ids=positive_ids,
-            attention_mask=positive_mask
-        )
+            self.OPTIMIZER.zero_grad()
 
-        negative_emb = self.MODEL(
-            input_ids=negative_ids,
-            attention_mask=negative_mask
-        )
+            # Wrap in automatic mixed precision (autocast) context to cut memory in half
+            with torch.amp.autocast("cuda"):
+                anchor_emb = self.MODEL(
+                    input_ids=anchor_ids,
+                    attention_mask=anchor_mask
+                )
 
-        loss = triplet_loss(
-            anchor_emb,
-            positive_emb,
-            negative_emb
-        )
+                positive_emb = self.MODEL(
+                    input_ids=positive_ids,
+                    attention_mask=positive_mask
+                )
 
-        loss.backward()
-        self.OPTIMIZER.step()
+                negative_emb = self.MODEL(
+                    input_ids=negative_ids,
+                    attention_mask=negative_mask
+                )
 
+                # Use CLS token embedding (index 0)
+                a_vec = anchor_emb.last_hidden_state[:, 0, :]
+                p_vec = positive_emb.last_hidden_state[:, 0, :]
+                n_vec = negative_emb.last_hidden_state[:, 0, :]
+
+                loss = triplet_loss(
+                    a_vec,
+                    p_vec,
+                    n_vec
+                )
+
+            loss.backward()
+            self.OPTIMIZER.step()
+
+            step = (i // batch_size) + 1
+            total_steps = (len(anchor_ids_all) + batch_size - 1) // batch_size
+            progress_percent = (step / total_steps) * 100
+            print(f"\rFinetuning Batch {step}/{total_steps} ({progress_percent:.1f}%) | Triplet Loss: {loss.item():.4f}", end="", flush=True)
+        print() 
+
+    def save_model(self):
+        self.MODEL.save_pretrained(config.FINE_TUNED_MODEL_DIR)
+        self.TOKENIZER.save_pretrained(config.FINE_TUNED_MODEL_DIR)
