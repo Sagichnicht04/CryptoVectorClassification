@@ -136,8 +136,7 @@ if config.TRAIN_DIRTY_CLASSIFIER:
                 non_crypto_embeddings.append(chunk["embedding"])
     dirty_classifier.train(crypto_embeddings, non_crypto_embeddings)
 else:
-    if config.CLASSIFY_CHUNKS:
-        dirty_classifier.load()
+    dirty_classifier.load()
 
 print("-- Step 5: Classify Chunks --")
 if config.CLASSIFY_CHUNKS:
@@ -251,7 +250,7 @@ else:
 
 l = list(fine_tuned_embedded_chunks.items())
 random.shuffle(l)
-fine_tuned_embedded_chunks = dict(l)
+fine_tuned_embedded_chunks = dict(l)  
 
 print("-- Step 8: Train Fine Tuned Classifier --")
 fine_tuned_classifier = get_classifier(config.FINE_TUNED_CLASSIFIER_PATH)
@@ -269,6 +268,10 @@ if config.TRAIN_FINETUNED_CLASSIFIER:
     fine_tuned_classifier.train(crypto_embeddings, non_crypto_embeddings)
 else:
     fine_tuned_classifier.load()
+
+if config.SKIP_FINETUNE:
+    fine_tuned_classifier = dirty_classifier
+    print("Skipped Finetune: Using Dirty Classifier as per config")
 
 
 print("-- Step 9: Evaluate Classifier --")

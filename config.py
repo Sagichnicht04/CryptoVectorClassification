@@ -1,16 +1,16 @@
 
 ## Steps
-PREPARE_DATA = True
-CHUNK_DATA = True
-BASE_EMBED_CHUNKS = True
-TRAIN_DIRTY_CLASSIFIER = True
-CLASSIFY_CHUNKS = True
-FINETUNE_MODEL = True
-FINETUNED_EMBED_CHUNKS = True
-TRAIN_FINETUNED_CLASSIFIER = True
+PREPARE_DATA = False
+CHUNK_DATA = False
+BASE_EMBED_CHUNKS = False
+TRAIN_DIRTY_CLASSIFIER = False
+CLASSIFY_CHUNKS = False
+FINETUNE_MODEL = False
+FINETUNED_EMBED_CHUNKS = False
+TRAIN_FINETUNED_CLASSIFIER = False
 EVALUATE_CLASSIFIER = True
 
-
+SKIP_FINETUNE = False
 
 # Add models from Hugging Face or local paths.
 # For local models, provide the absolute path to the model directory.
@@ -33,10 +33,10 @@ MODELS = [
 MODEL_NAME = MODELS[0]
 
 # Either neural_network_binary_classifier or random_forest_classifier
-CLASSIFIER = "neural_network_binary_classifier"
+CLASSIFIER = "random_forest_classifier"
 
 # Either graph or text
-REPRESENTATION = "text"
+REPRESENTATION = "graph"
 
 #2**12 = 4096
 #TOKEN_SIZE = 2**12
