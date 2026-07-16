@@ -1,13 +1,13 @@
 
 ## Steps
-PREPARE_DATA = False
-CHUNK_DATA = False
-BASE_EMBED_CHUNKS = False
-TRAIN_DIRTY_CLASSIFIER = False
-CLASSIFY_CHUNKS = False
-FINETUNE_MODEL = False
-FINETUNED_EMBED_CHUNKS = False
-TRAIN_FINETUNED_CLASSIFIER = False
+PREPARE_DATA = True
+CHUNK_DATA = True
+BASE_EMBED_CHUNKS = True
+TRAIN_DIRTY_CLASSIFIER = True
+CLASSIFY_CHUNKS = True
+FINETUNE_MODEL = True
+FINETUNED_EMBED_CHUNKS = True
+TRAIN_FINETUNED_CLASSIFIER = True
 EVALUATE_CLASSIFIER = True
 
 
@@ -30,13 +30,13 @@ MODELS = [
 ]
 
 # The pre-trained model to use from Hugging Face
-MODEL_NAME = MODELS[11]
+MODEL_NAME = MODELS[0]
 
 # Either neural_network_binary_classifier or random_forest_classifier
 CLASSIFIER = "neural_network_binary_classifier"
 
 # Either graph or text
-REPRESENTATION = "graph"
+REPRESENTATION = "text"
 
 #2**12 = 4096
 #TOKEN_SIZE = 2**12
@@ -50,7 +50,6 @@ USE_MODIFIED_FILES = False
 
 # The classification threshold for detecting crypto files.
 CLASSIFIER_THRESHOLD = 0.95
-
 
 INTERPRETER = "venv/bin/python3"
 

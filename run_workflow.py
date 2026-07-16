@@ -7,6 +7,7 @@ import torch
 from classifier import get_classifier
 import random
 import json
+from evaluate import evaluation
 
 if config.CHUNK_DATA or config.BASE_EMBED_CHUNKS or config.FINETUNE_MODEL:
     base_embedding = embedding_model(config.MODEL_NAME)
@@ -313,15 +314,23 @@ if config.EVALUATE_CLASSIFIER:
 
     os.makedirs(config.EVALUATION_RESULT_PATH, exist_ok=True)
 
-    with open(f"{config.EVALUATION_RESULT_PATH}crypto_results", "w") as f:
+    with open(f"{config.EVALUATION_RESULT_PATH}crypto_results.json", "w") as f:
         json.dump(crypto_embeddings, f)
-    with open(f"{config.EVALUATION_RESULT_PATH}non_crypto_results", "w") as f:
+    with open(f"{config.EVALUATION_RESULT_PATH}non_crypto_results.json", "w") as f:
         json.dump(non_crypto_embeddings, f)
-    with open(f"{config.EVALUATION_RESULT_PATH}api_crypto_results", "w") as f:
+    with open(f"{config.EVALUATION_RESULT_PATH}api_crypto_results.json", "w") as f:
         json.dump(discarded_crypto_embeddings, f)
 
     print(f"Predicted {len(detected_crypto_chunks)} crypto chunks out of  chunks in crypto files")
     torch.save(detected_crypto_chunks, config.CHUNK_CLASSIFICATION_PATH)
     print(f"Saved predictions to disk")
+
+
+    evaluator = evaluation()
+    results = evaluator.evaluate(crypto_embeddings,non_crypto_embeddings,discarded_crypto_embeddings)
+    print(results)
+
+    with open(f"{config.EVALUATION_RESULT_PATH}evaluation.json", "w") as f:
+        json.dump(results, f)
 else:
     pass
