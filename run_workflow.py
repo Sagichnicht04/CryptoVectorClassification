@@ -1,3 +1,4 @@
+
 import config
 import subprocess
 from  embedding import embedding_model
@@ -8,6 +9,12 @@ from classifier import get_classifier
 import random
 import json
 from evaluate import evaluation
+import time
+
+
+
+
+random.seed(config.RANDOM_SEED)
 
 if config.CHUNK_DATA or config.BASE_EMBED_CHUNKS or config.FINETUNE_MODEL:
     base_embedding = embedding_model(config.MODEL_NAME)

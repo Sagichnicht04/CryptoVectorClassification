@@ -4,7 +4,7 @@ import random
 import argparse
 import config
 
-random.seed(70)
+random.seed(config.RANDOM_SEED)
 
 
 def reset_evaluation_directories():
