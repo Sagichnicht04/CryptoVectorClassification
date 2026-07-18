@@ -3,11 +3,11 @@ import time
 ## Steps
 PREPARE_DATA = True
 CHUNK_DATA = True
-BASE_EMBED_CHUNKS = True
-TRAIN_DIRTY_CLASSIFIER = True
-CLASSIFY_CHUNKS = True
-FINETUNE_MODEL = True
-FINETUNED_EMBED_CHUNKS = True
+BASE_EMBED_CHUNKS = False
+TRAIN_DIRTY_CLASSIFIER = False
+CLASSIFY_CHUNKS = False
+FINETUNE_MODEL = False
+FINETUNED_EMBED_CHUNKS = False
 TRAIN_FINETUNED_CLASSIFIER = True
 EVALUATE_CLASSIFIER = True
 
@@ -16,6 +16,7 @@ SKIP_FINETUNE = False
 t = time.localtime()
 fmt_time = time.strftime("%H%M%S", t)
 RANDOM_SEED = int(fmt_time)
+RANDOM_SEED = 142024
 
 
 # Add models from Hugging Face or local paths.
@@ -39,7 +40,7 @@ MODELS = [
 MODEL_NAME = MODELS[0]
 
 # Either neural_network_binary_classifier or random_forest_classifier
-CLASSIFIER = "neural_network_binary_classifier"
+CLASSIFIER = "random_forest_classifier"
 
 # Either graph or text
 REPRESENTATION = "text"
@@ -61,11 +62,11 @@ INTERPRETER = "venv/bin/python3"
 
 
 ## File Paths
-CHUNKS_PATH = f"{REPRESENTATION}_chunks.pt"
-BASE_EMBEDDINGS_PATH = f"{REPRESENTATION}_base_embeddings.pt"
-DIRTY_CLASSIFIER_PATH = f"{REPRESENTATION}_{CLASSIFIER}.{"pkl" if REPRESENTATION == "graph" else "pt"}"
-CHUNK_CLASSIFICATION_PATH = f"{REPRESENTATION}_{CLASSIFIER}_classifications.pt"
-FINE_TUNED_MODEL_DIR = f"{REPRESENTATION}_{CLASSIFIER}_fine_tuned/"
-FINE_TUNED_EMBEDDINGS_PATH = f"{REPRESENTATION}_fine_tuned_embeddings.pt"
-FINE_TUNED_CLASSIFIER_PATH = f"fine_tuned_{REPRESENTATION}_{CLASSIFIER}.{"pkl" if REPRESENTATION == "graph" else "pt"}"
+CHUNKS_PATH = f"cache/{REPRESENTATION}_chunks.pt"
+BASE_EMBEDDINGS_PATH = f"cache/{REPRESENTATION}_base_embeddings.pt"
+DIRTY_CLASSIFIER_PATH = f"cache/{REPRESENTATION}_{CLASSIFIER}.{"pkl" if REPRESENTATION == "graph" else "pt"}"
+CHUNK_CLASSIFICATION_PATH = f"cache/{REPRESENTATION}_{CLASSIFIER}_classifications.pt"
+FINE_TUNED_MODEL_DIR = f"cache/{REPRESENTATION}_{CLASSIFIER}_fine_tuned/"
+FINE_TUNED_EMBEDDINGS_PATH = f"cache/{REPRESENTATION}_fine_tuned_embeddings.pt"
+FINE_TUNED_CLASSIFIER_PATH = f"cache/fine_tuned_{REPRESENTATION}_{CLASSIFIER}.{"pkl" if REPRESENTATION == "graph" else "pt"}"
 EVALUATION_RESULT_PATH = f"Evaluations/{REPRESENTATION}_{CLASSIFIER}_evaluation_{RANDOM_SEED}/"

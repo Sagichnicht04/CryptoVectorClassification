@@ -1,4 +1,3 @@
-
 import config
 import subprocess
 from  embedding import embedding_model
@@ -10,9 +9,6 @@ import random
 import json
 from evaluate import evaluation
 import time
-
-
-
 
 random.seed(config.RANDOM_SEED)
 
@@ -88,7 +84,7 @@ else:
     chunks = torch.load(config.CHUNKS_PATH,weights_only=False)
     for file in chunks:
         if not os.path.exists(file):
-            print("Fatal: Path of cached chunk file does not exist")
+            print("Fatal: Path of cached chunk file does not exist: " + file)
             exit()
     print("Loaded Cached Chunks from Disk")
 
@@ -117,10 +113,6 @@ if config.BASE_EMBED_CHUNKS:
 else:
     if config.TRAIN_DIRTY_CLASSIFIER or config.CLASSIFY_CHUNKS or config.FINETUNE_MODEL:
         base_embedded_chunks = torch.load(config.BASE_EMBEDDINGS_PATH,weights_only=False)
-        for file in base_embedded_chunks:
-            if not os.path.exists(file):
-                print("Fatal: Path of cached embedding file does not exist")
-                exit()
         print("Loaded Cached Embeddings from Disk")
 
 l = list(base_embedded_chunks.items())
@@ -249,10 +241,6 @@ if config.FINETUNED_EMBED_CHUNKS:
     print(f"Saved embeddings for {len(fine_tuned_embedded_chunks)} files to disk")
 else:
     fine_tuned_embedded_chunks = torch.load(config.FINE_TUNED_EMBEDDINGS_PATH,weights_only=False)
-    for file in fine_tuned_embedded_chunks:
-        if not os.path.exists(file):
-            print("Fatal: Path of cached embedding file does not exist")
-            exit()
     print("Loaded Cached Embeddings from Disk")
 
 l = list(fine_tuned_embedded_chunks.items())

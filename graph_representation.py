@@ -273,7 +273,7 @@ class CryptoDFGPreprocessor:
 def get_lang_from_path(path: str) -> str:
     if path.endswith(('.c', '.h')): return 'c'
     if path.endswith(('.cpp', '.hpp', '.hh', '.cc')): return 'cpp'
-    return 'undefined'
+    return None
 
 def standardize_graph_representation(lang, text):
     preprocessor = CryptoDFGPreprocessor(text, lang)
