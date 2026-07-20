@@ -1,22 +1,24 @@
 import time
+# Vielleicht wichtig
+#sudo sh -c "echo '0000:01:00.0' > /sys/bus/pci/drivers/nvidia/unbind"
 
 ## Steps
 PREPARE_DATA = True
 CHUNK_DATA = True
-BASE_EMBED_CHUNKS = False
-TRAIN_DIRTY_CLASSIFIER = False
-CLASSIFY_CHUNKS = False
-FINETUNE_MODEL = False
-FINETUNED_EMBED_CHUNKS = False
+BASE_EMBED_CHUNKS = True
+TRAIN_DIRTY_CLASSIFIER = True
+CLASSIFY_CHUNKS = True
+FINETUNE_MODEL = True
+FINETUNED_EMBED_CHUNKS = True
 TRAIN_FINETUNED_CLASSIFIER = True
 EVALUATE_CLASSIFIER = True
 
 SKIP_FINETUNE = False
 
 t = time.localtime()
-fmt_time = time.strftime("%H%M%S", t)
+fmt_time = time.strftime("%d%H%M%S", t)
 RANDOM_SEED = int(fmt_time)
-RANDOM_SEED = 142024
+#RANDOM_SEED = 999999
 
 
 # Add models from Hugging Face or local paths.
@@ -40,7 +42,7 @@ MODELS = [
 MODEL_NAME = MODELS[0]
 
 # Either neural_network_binary_classifier or random_forest_classifier
-CLASSIFIER = "random_forest_classifier"
+CLASSIFIER = "neural_network_binary_classifier"
 
 # Either graph or text
 REPRESENTATION = "text"

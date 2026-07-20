@@ -131,7 +131,7 @@ class BCEClassifier:
         criterion = nn.BCEWithLogitsLoss()
         optimizer = optim.Adam(self.model.parameters(), lr=0.005)
 
-        epochs = 100
+        epochs = 500
         batch_size = 32
         dataset_size = len(X)
 

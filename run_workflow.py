@@ -31,7 +31,7 @@ chunks = {}
 if config.CHUNK_DATA:
     all_files = []
 
-    for root, _, files in os.walk("./data"):
+    for root, _, files in os.walk("./systemd"):
         for filename in files:
             path = os.path.join(root, filename)
             lang = get_lang_from_path(path)
@@ -294,7 +294,7 @@ if config.EVALUATE_CLASSIFIER:
                 })
                 
 
-        if "data/evaluation/non_crypto/non_crypto_dataset" in file:
+        elif "data/evaluation/non_crypto/non_crypto_dataset" in file:
             non_crypto_embeddings[file] = [] 
             for index, probability in enumerate(probabilities):
                 non_crypto_embeddings[file].append({
@@ -302,10 +302,18 @@ if config.EVALUATE_CLASSIFIER:
                     "clear_text": fine_tuned_embedding.decode(chunk_tokens[index]["input_ids"])
                 })
                 
-        if "data/evaluation/non_crypto/discarded_dataset" in file:
+        elif "data/evaluation/non_crypto/discarded_dataset" in file:
             discarded_crypto_embeddings[file] = [] 
             for index, probability in enumerate(probabilities):
                 discarded_crypto_embeddings[file].append({
+                    "probability": probability[1],
+                    "clear_text": fine_tuned_embedding.decode(chunk_tokens[index]["input_ids"])
+                })
+
+        else:
+            non_crypto_embeddings[file] = [] 
+            for index, probability in enumerate(probabilities):
+                non_crypto_embeddings[file].append({
                     "probability": probability[1],
                     "clear_text": fine_tuned_embedding.decode(chunk_tokens[index]["input_ids"])
                 })
