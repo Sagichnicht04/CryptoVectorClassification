@@ -34,15 +34,16 @@ for root, _, files in os.walk(config.DATA_DIR):
         updated_files.append(path)
 
 def get_label(path):
+    new_path = "/".join(path.split("/")[::-1][0:2][::-1])
     for file in updated_files:
-        if path in file:
+        if new_path in file:
             training = "training" in file
             evaluation = "evaluation" in file
             crypto = "training/crypto" in file or "evaluation/novel_crypto" in file
             discarded = "discarded_dataset" in file
             non_crypto = "non_crypto_dataset" in file
             return {"training":training, "evaluation": evaluation, "crypto": crypto, "discarded": discarded, "non_crypto": non_crypto}
-    print("ERROR: Could not assign labels to file. Not found.")
+    print(f"ERROR: Could not assign labels to file. Not found. {new_path}")
     return {"training":False, "evaluation": False, "crypto": False, "discarded": False, "non_crypto": False}
 
 
@@ -51,50 +52,49 @@ chunks = {}
 if config.CHUNK_DATA:
     all_files = []
 
+    chunk_counter = 0
+    file_counter = 0
     for root, _, files in os.walk(config.DATA_DIR):
         for filename in files:
             path = os.path.join(root, filename)
             lang = get_lang_from_path(path)
             if lang:
-                all_files.append(("/".join(path.split("/")[::-1][0:3][::-1]), lang))
+                new_path = "/".join(path.split("/")[::-1][0:2][::-1])
+                all_files.append((new_path, lang))
                 
-    
-    chunk_counter = 0
-    file_counter = 0
-    for file, lang in all_files:
-        with open(file, "r") as f:
-            content = f.read()
+                with open(path, "r") as f:
+                    content = f.read()
 
-        if config.REPRESENTATION == "graph":
-            representation = standardize_graph_representation(lang, content)
-        else:
-            representation = content
+                if config.REPRESENTATION == "graph":
+                    representation = standardize_graph_representation(lang, content)
+                else:
+                    representation = content
 
-        # Tokenize the entire representation
-        tokens = base_embedding.TOKENIZER(
-            representation,
-            return_tensors="pt",
-            padding=False,
-            truncation=False
-        )
+                # Tokenize the entire representation
+                tokens = base_embedding.TOKENIZER(
+                    representation,
+                    return_tensors="pt",
+                    padding=False,
+                    truncation=False
+                )
 
-        input_ids = tokens['input_ids'].squeeze()
+                input_ids = tokens['input_ids'].squeeze()
 
-        
-        # Define chunk size and overlap
-        chunk_size = config.TOKEN_SIZE
-        overlap = config.OVERLAP
-        stride = chunk_size - overlap
+                
+                # Define chunk size and overlap
+                chunk_size = config.TOKEN_SIZE
+                overlap = config.OVERLAP
+                stride = chunk_size - overlap
 
-        # Create overlapping chunks
-        chunks_of_file = [
-            input_ids[i:i + chunk_size]
-            for i in range(0, input_ids.size(0), stride)
-        ]
-        chunks[file] = chunks_of_file
-        chunk_counter += len(chunks_of_file)
-        file_counter += 1
-        print(f"\rProcessed: {file_counter*100/len(all_files)}%", end="", flush=True)
+                # Create overlapping chunks
+                chunks_of_file = [
+                    input_ids[i:i + chunk_size]
+                    for i in range(0, input_ids.size(0), stride)
+                ]
+                chunks[new_path] = chunks_of_file
+                chunk_counter += len(chunks_of_file)
+                file_counter += 1
+                print(f"\rProcessed: {file_counter*100/len(files)}%", end="", flush=True)
 
 
     torch.save(chunks, config.CHUNKS_PATH)
@@ -329,14 +329,6 @@ if config.EVALUATE_CLASSIFIER:
                     "clear_text": fine_tuned_embedding.decode(chunk_tokens[index]["input_ids"])
                 })
 
-        else:
-            non_crypto_embeddings[file] = [] 
-            for index, probability in enumerate(probabilities):
-                non_crypto_embeddings[file].append({
-                    "probability": probability[1],
-                    "clear_text": fine_tuned_embedding.decode(chunk_tokens[index]["input_ids"])
-                })
-
     os.makedirs(config.EVALUATION_RESULT_PATH, exist_ok=True)
 
     with open(f"{config.EVALUATION_RESULT_PATH}crypto_results.json", "w") as f:
@@ -346,7 +338,7 @@ if config.EVALUATE_CLASSIFIER:
     with open(f"{config.EVALUATION_RESULT_PATH}api_crypto_results.json", "w") as f:
         json.dump(discarded_crypto_embeddings, f)
 
-    print(f"Predicted {len(detected_crypto_chunks)} crypto chunks out of  chunks in crypto files")
+    print(f"Predicted {len(detected_crypto_chunks)} crypto chunks out of chunks in crypto files")
     torch.save(detected_crypto_chunks, config.CHUNK_CLASSIFICATION_PATH)
     print(f"Saved predictions to disk")
 
