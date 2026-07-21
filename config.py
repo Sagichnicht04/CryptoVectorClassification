@@ -2,6 +2,8 @@ import time
 # Vielleicht wichtig
 #sudo sh -c "echo '0000:01:00.0' > /sys/bus/pci/drivers/nvidia/unbind"
 
+DATA_DIR = "./data"
+
 ## Steps
 PREPARE_DATA = True
 CHUNK_DATA = True
