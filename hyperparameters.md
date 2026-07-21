@@ -1,10 +1,12 @@
 Embedding Model
-Overlap
+Overlap //Kein Hyperparameter => Mehr overlap hilft mehr
 
 Binary Thingy:
-Num Epochs (?)
-Num Nodes
+Num Epochs (?) //Kein Hyperparameter => Mehr Epochen helfen natürlich
+batch_size
+learning_rate
 
 Random Forst:
-Num Forests
+Num Trees (?) //Kein Hyperparameter => 
 Tree depth
+min_samples_leaf

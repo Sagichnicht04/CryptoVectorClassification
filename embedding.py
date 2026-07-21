@@ -25,7 +25,6 @@ class embedding_model:
     def __init__(self, model_dir):
         self.TOKENIZER = AutoTokenizer.from_pretrained(
             model_dir,
-            local_files_only=True
             )
 
         self.MODEL = AutoModel.from_pretrained(
@@ -33,7 +32,6 @@ class embedding_model:
             use_safetensors=True,
             #torch_dtype=torch.float16,
             torch_dtype="auto",
-            local_files_only=True
         ).cuda()
 
         # Enable gradient checkpointing to save VRAM
