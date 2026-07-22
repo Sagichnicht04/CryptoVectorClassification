@@ -1,0 +1,16 @@
+Command '['venv/bin/python3', 'run_workflow.py']' returned non-zero exit status 1.
+Traceback (most recent call last):
+  File "/home/flo/Documents/MyVectorClassification/run_tuning.py", line 179, in execute_run
+    subprocess.run(
+    ~~~~~~~~~~~~~~^
+        ["venv/bin/python3", "run_workflow.py"],
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<2 lines>...
+        check=True
+        ^^^^^^^^^^
+    )
+    ^
+  File "/usr/lib/python3.13/subprocess.py", line 577, in run
+    raise CalledProcessError(retcode, process.args,
+                             output=stdout, stderr=stderr)
+subprocess.CalledProcessError: Command '['venv/bin/python3', 'run_workflow.py']' returned non-zero exit status 1.

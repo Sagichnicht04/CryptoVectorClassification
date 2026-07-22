@@ -46,9 +46,9 @@ class RandomForestClassifier:
               f"and {len(all_non_crypto_embs)} non-crypto chunks…")
 
         self.model = _RFC(
-            n_estimators=200,
-            max_depth=None,
-            min_samples_leaf=1,
+            n_estimators=config.RF_N_ESTIMATORS,
+            max_depth=config.RF_MAX_DEPTH,
+            min_samples_leaf=config.RF_MIN_SAMPLES_LEAF,
             n_jobs=-1,
             random_state=random.randrange(10000),
         )
@@ -129,10 +129,10 @@ class BCEClassifier:
         self.model.train()
 
         criterion = nn.BCEWithLogitsLoss()
-        optimizer = optim.Adam(self.model.parameters(), lr=0.005)
+        optimizer = optim.Adam(self.model.parameters(), lr=config.NN_LEARNING_RATE)
 
-        epochs = 500
-        batch_size = 32
+        epochs = config.NN_EPOCHS
+        batch_size = config.NN_BATCH_SIZE
         dataset_size = len(X)
 
         print(f"  Training BCE Classifier on {len(all_crypto_embs)} crypto chunks "

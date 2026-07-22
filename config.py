@@ -1,13 +1,12 @@
 import time
-# Vielleicht wichtig
-#sudo sh -c "echo '0000:01:00.0' > /sys/bus/pci/drivers/nvidia/unbind"
+import os
 
 DATA_DIR = "./data"
 
 ## Steps
-PREPARE_DATA = True
-CHUNK_DATA = False
-BASE_EMBED_CHUNKS = False
+PREPARE_DATA = False
+CHUNK_DATA = True
+BASE_EMBED_CHUNKS = True
 TRAIN_DIRTY_CLASSIFIER = True
 CLASSIFY_CHUNKS = False
 FINETUNE_MODEL = False
@@ -17,60 +16,52 @@ EVALUATE_CLASSIFIER = True
 
 SKIP_FINETUNE = True
 
-t = time.localtime()
-fmt_time = time.strftime("%d%H%M%S", t)
-RANDOM_SEED = int(fmt_time)
-#RANDOM_SEED = 999999
+RANDOM_SEED = 999999
 
-
-# Add models from Hugging Face or local paths.
-# For local models, provide the absolute path to the model directory.
-MODELS = [
-    "microsoft/codebert-base",
-    "Qwen/Qwen2.5-Coder-14B",
-    "Qwen/Qwen2.5-Coder-14B-Instruct",
-    "bigcode/starcoder2-15b",
-    "Qwen/Qwen2.5-14B-Instruct",
-    "Qwen/Qwen2.5-7B-Instruct",
-    "arcee-ai/SuperNova-Medius",
-    "deepseek-ai/deepseek-coder-6.7b-instruct",
-    "microsoft/codebert-base-text",  # Example of a local fine-tuned model
-    "microsoft/codebert-base-graph",
-    "microsoft/codebert-base-math",
-    "/home/flo/codebert-local",
-]
-
-# The pre-trained model to use from Hugging Face
-MODEL_NAME = MODELS[0]
-
-# Either neural_network_binary_classifier or random_forest_classifier
-CLASSIFIER = "neural_network_binary_classifier"
-
-# Either graph or text
+MODEL_NAME = "bigcode/starcoder2-15b"
+CLASSIFIER = "random_forest_classifier"
 REPRESENTATION = "text"
 
-#2**12 = 4096
-#TOKEN_SIZE = 2**12
-TOKEN_SIZE = 512
-OVERLAP = 128
+# Model maximum context lengths mapping
+MODEL_CONTEXT_LENGTHS = {
+    "microsoft/codebert-base": 512,
+    "Salesforce/codet5-small": 512,
+    "bigcode/starcoder2-15b": 16384,
+    "Qwen/Qwen2.5-7B-Instruct": 32768,
+}
+
+TOKEN_SIZE = MODEL_CONTEXT_LENGTHS.get(MODEL_NAME, 512)
+OVERLAP_PROPORTION = 0.25
+OVERLAP = int(TOKEN_SIZE * OVERLAP_PROPORTION)
 
 NUM_EVAL_FILES = 50
 NUM_TRAIN_FILES = 500
 
 USE_MODIFIED_FILES = False
-
-# The classification threshold for detecting crypto files.
 CLASSIFIER_THRESHOLD = 0.95
-
 INTERPRETER = "venv/bin/python3"
 
+# Random Forest Hyperparameters
+RF_N_ESTIMATORS = 100
+RF_MAX_DEPTH = None
+RF_MIN_SAMPLES_LEAF = 1
 
-## File Paths
-CHUNKS_PATH = f"cache/{REPRESENTATION}_chunks.pt"
-BASE_EMBEDDINGS_PATH = f"cache/{REPRESENTATION}_base_embeddings.pt"
-DIRTY_CLASSIFIER_PATH = f"cache/{REPRESENTATION}_{CLASSIFIER}.{"pkl" if REPRESENTATION == "graph" else "pt"}"
-CHUNK_CLASSIFICATION_PATH = f"cache/{REPRESENTATION}_{CLASSIFIER}_classifications.pt"
-FINE_TUNED_MODEL_DIR = f"cache/{REPRESENTATION}_{CLASSIFIER}_fine_tuned/"
-FINE_TUNED_EMBEDDINGS_PATH = f"cache/{REPRESENTATION}_fine_tuned_embeddings.pt"
-FINE_TUNED_CLASSIFIER_PATH = f"cache/fine_tuned_{REPRESENTATION}_{CLASSIFIER}.{"pkl" if REPRESENTATION == "graph" else "pt"}"
-EVALUATION_RESULT_PATH = f"Evaluations/{REPRESENTATION}_{CLASSIFIER}_evaluation_{RANDOM_SEED}/"
+# Neural Network Hyperparameters
+NN_LEARNING_RATE = 0.001
+NN_BATCH_SIZE = 32
+NN_EPOCHS = 100
+
+MODEL_CLEAN = "starcoder2_15b"
+OVERLAP_CLEAN = "overlap_1_4"
+
+CHUNKS_PATH = "cache/text_chunks_starcoder2_15b_overlap_1_4.pt"
+BASE_EMBEDDINGS_PATH = "cache/text_base_embeddings_starcoder2_15b_overlap_1_4.pt"
+
+DIRTY_CLASSIFIER_PATH = "results/phase1_model_search/rf_starcoder2-15b/model.pkl"
+EVALUATION_RESULT_PATH = "results/phase1_model_search/rf_starcoder2-15b/"
+
+# Standard dummy paths to satisfy workflow references
+CHUNK_CLASSIFICATION_PATH = f"cache/text_{CLASSIFIER}_classifications_{MODEL_CLEAN}_{OVERLAP_CLEAN}.pt"
+FINE_TUNED_MODEL_DIR = f"cache/text_{CLASSIFIER}_fine_tuned_{MODEL_CLEAN}_{OVERLAP_CLEAN}/"
+FINE_TUNED_EMBEDDINGS_PATH = f"cache/text_fine_tuned_embeddings_{MODEL_CLEAN}_{OVERLAP_CLEAN}.pt"
+FINE_TUNED_CLASSIFIER_PATH = f"cache/fine_tuned_text_{CLASSIFIER}_{MODEL_CLEAN}_{OVERLAP_CLEAN}.pt"

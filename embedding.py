@@ -71,7 +71,10 @@ class embedding_model:
         }
 
         with torch.no_grad():
-            outputs = self.MODEL(**chunk_tokens)
+            if hasattr(self.MODEL, "encoder") and getattr(self.MODEL.config, "is_encoder_decoder", False):
+                outputs = self.MODEL.encoder(**chunk_tokens)
+            else:
+                outputs = self.MODEL(**chunk_tokens)
         
         
             if hasattr(outputs, 'pooler_output') and outputs.pooler_output is not None:

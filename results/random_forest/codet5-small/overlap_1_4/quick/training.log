@@ -1,0 +1,26 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/131 [00:00<?, ?it/s]Loading weights: 100%|██████████| 131/131 [00:00<00:00, 13534.35it/s]
+-- Step 1: Preparing Data --
+Skipped
+-- Step 2: Chunk Data --
+Loaded Cached Chunks from Disk
+-- Step 3: Base Embed Chunks --
+Loaded Cached Embeddings from Disk
+-- Step 4: Train dirty Classifier --
+ERROR: Could not assign labels to file. Not found. novel_crypto/litecoincash-project_litecoincash_blake2s-ref.c
+ERROR: Could not assign labels to file. Not found. novel_crypto/deluxetiky_ESP8266ArduinoCrypto_Poly1305.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/unix-ninja_hackersandbox_md5.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/DirtBagXon_hypseus-singe_md5.c
+ERROR: Could not assign labels to file. Not found. novel_crypto/fcorbelli_zpaqfranz_libzpaq.cpp
+  Training Random Forest on 3661 crypto chunks and 14922 non-crypto chunks…
+  RF cross-val accuracy: 92.06% ± 0.56%
+  Random Forest classifier saved to 'results/random_forest/codet5-small/overlap_1_4/quick/model.pkl'
+Skipping Fine-Tuning steps. Evaluating Base Embeddings and Dirty Classifier.
+-- Step 9: Evaluate Classifier --
+ERROR: Could not assign labels to file. Not found. novel_crypto/litecoincash-project_litecoincash_blake2s-ref.c
+ERROR: Could not assign labels to file. Not found. novel_crypto/deluxetiky_ESP8266ArduinoCrypto_Poly1305.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/unix-ninja_hackersandbox_md5.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/DirtBagXon_hypseus-singe_md5.c
+ERROR: Could not assign labels to file. Not found. novel_crypto/fcorbelli_zpaqfranz_libzpaq.cpp
+Generated gorgeous interactive HTML evaluation report: results/random_forest/codet5-small/overlap_1_4/quick/evaluation_report.html
+{'input_type': 'text', 'classifier_type': 'random_forest_classifier', 'best_f1_threshold': 0.552, 'best_f1_metrics': {'novel_crypto_tp': 42, 'novel_crypto_fn': 8, 'non_crypto_unrelated_tn': 46, 'non_crypto_unrelated_fp': 4, 'non_crypto_discarded_tn': 50, 'non_crypto_discarded_fp': 0}, 'min_fn_threshold': 0.22, 'min_fn_metrics': {'novel_crypto_tp': 50, 'novel_crypto_fn': 0, 'non_crypto_unrelated_tn': 25, 'non_crypto_unrelated_fp': 25, 'non_crypto_discarded_tn': 19, 'non_crypto_discarded_fp': 31}, 'min_fp_threshold': 0.976, 'min_fp_metrics': {'novel_crypto_tp': 2, 'novel_crypto_fn': 48, 'non_crypto_unrelated_tn': 50, 'non_crypto_unrelated_fp': 0, 'non_crypto_discarded_tn': 50, 'non_crypto_discarded_fp': 0}}

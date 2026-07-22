@@ -1,0 +1,38 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Fetching 4 files:   0%|          | 0/4 [00:00<?, ?it/s]Fetching 4 files:  25%|██▌       | 1/4 [16:28<49:25, 988.36s/it]Fetching 4 files:  50%|█████     | 2/4 [17:00<14:11, 425.77s/it]Fetching 4 files: 100%|██████████| 4/4 [17:00<00:00, 255.08s/it]
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights: 100%|██████████| 338/338 [00:00<00:00, 8358.64it/s]
+[transformers] [1mQwen2Model LOAD REPORT[0m from: Qwen/Qwen2.5-7B-Instruct
+Key            | Status     |  | 
+---------------+------------+--+-
+lm_head.weight | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+Traceback (most recent call last):
+  File "/home/flo/Documents/MyVectorClassification/run_workflow.py", line 18, in <module>
+    base_embedding = embedding_model(config.MODEL_NAME)
+  File "/home/flo/Documents/MyVectorClassification/embedding.py", line 35, in __init__
+    ).cuda()
+      ~~~~^^
+  File "/home/flo/Documents/MyVectorClassification/venv/lib/python3.13/site-packages/transformers/modeling_utils.py", line 3700, in cuda
+    return super().cuda(*args, **kwargs)
+           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/flo/Documents/MyVectorClassification/venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1050, in cuda
+    return self._apply(lambda t: t.cuda(device))
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/flo/Documents/MyVectorClassification/venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 900, in _apply
+    module._apply(fn)
+    ~~~~~~~~~~~~~^^^^
+  File "/home/flo/Documents/MyVectorClassification/venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 900, in _apply
+    module._apply(fn)
+    ~~~~~~~~~~~~~^^^^
+  File "/home/flo/Documents/MyVectorClassification/venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 900, in _apply
+    module._apply(fn)
+    ~~~~~~~~~~~~~^^^^
+  [Previous line repeated 1 more time]
+  File "/home/flo/Documents/MyVectorClassification/venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 927, in _apply
+    param_applied = fn(param)
+  File "/home/flo/Documents/MyVectorClassification/venv/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1050, in <lambda>
+    return self._apply(lambda t: t.cuda(device))
+                                 ~~~~~~^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 130.00 MiB. GPU 0 has a total capacity of 11.76 GiB of which 34.81 MiB is free. Including non-PyTorch memory, this process has 11.29 GiB memory in use. Of the allocated memory 11.09 GiB is allocated by PyTorch, and 105.47 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

@@ -1,0 +1,26 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|██████████| 199/199 [00:00<00:00, 14440.35it/s]
+-- Step 1: Preparing Data --
+Skipped
+-- Step 2: Chunk Data --
+Loaded Cached Chunks from Disk
+-- Step 3: Base Embed Chunks --
+Loaded Cached Embeddings from Disk
+-- Step 4: Train dirty Classifier --
+ERROR: Could not assign labels to file. Not found. novel_crypto/litecoincash-project_litecoincash_blake2s-ref.c
+ERROR: Could not assign labels to file. Not found. novel_crypto/deluxetiky_ESP8266ArduinoCrypto_Poly1305.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/unix-ninja_hackersandbox_md5.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/fcorbelli_zpaqfranz_libzpaq.cpp
+  Training BCE Classifier on 4277 crypto chunks and 19912 non-crypto chunks…
+    Epoch 1/50 - Loss: 0.3937
+    Epoch 20/50 - Loss: 0.2014
+    Epoch 40/50 - Loss: 0.1832
+  BCE classifier saved to 'results/neural_network/codebert_base/overlap_1_4/lr_0.001_bs_32_ep_50/model.pt'
+Skipping Fine-Tuning steps. Evaluating Base Embeddings and Dirty Classifier.
+-- Step 9: Evaluate Classifier --
+ERROR: Could not assign labels to file. Not found. novel_crypto/litecoincash-project_litecoincash_blake2s-ref.c
+ERROR: Could not assign labels to file. Not found. novel_crypto/deluxetiky_ESP8266ArduinoCrypto_Poly1305.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/unix-ninja_hackersandbox_md5.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/fcorbelli_zpaqfranz_libzpaq.cpp
+Generated gorgeous interactive HTML evaluation report: results/neural_network/codebert_base/overlap_1_4/lr_0.001_bs_32_ep_50/evaluation_report.html
+{'input_type': 'text', 'classifier_type': 'neural_network_binary_classifier', 'best_f1_threshold': 0.783, 'best_f1_metrics': {'novel_crypto_tp': 45, 'novel_crypto_fn': 5, 'non_crypto_unrelated_tn': 50, 'non_crypto_unrelated_fp': 0, 'non_crypto_discarded_tn': 46, 'non_crypto_discarded_fp': 4}, 'min_fn_threshold': 0.271, 'min_fn_metrics': {'novel_crypto_tp': 50, 'novel_crypto_fn': 0, 'non_crypto_unrelated_tn': 28, 'non_crypto_unrelated_fp': 22, 'non_crypto_discarded_tn': 16, 'non_crypto_discarded_fp': 34}, 'min_fp_threshold': 0.978, 'min_fp_metrics': {'novel_crypto_tp': 20, 'novel_crypto_fn': 30, 'non_crypto_unrelated_tn': 50, 'non_crypto_unrelated_fp': 0, 'non_crypto_discarded_tn': 50, 'non_crypto_discarded_fp': 0}}

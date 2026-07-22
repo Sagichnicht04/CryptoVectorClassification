@@ -1,0 +1,24 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/199 [00:00<?, ?it/s]Loading weights: 100%|██████████| 199/199 [00:00<00:00, 14958.18it/s]
+-- Step 1: Preparing Data --
+Skipped
+-- Step 2: Chunk Data --
+Loaded Cached Chunks from Disk
+-- Step 3: Base Embed Chunks --
+Loaded Cached Embeddings from Disk
+-- Step 4: Train dirty Classifier --
+ERROR: Could not assign labels to file. Not found. novel_crypto/deluxetiky_ESP8266ArduinoCrypto_Poly1305.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/unix-ninja_hackersandbox_md5.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/DirtBagXon_hypseus-singe_md5.c
+ERROR: Could not assign labels to file. Not found. novel_crypto/fcorbelli_zpaqfranz_libzpaq.cpp
+  Training Random Forest on 4256 crypto chunks and 19252 non-crypto chunks…
+  RF cross-val accuracy: 93.75% ± 1.03%
+  Random Forest classifier saved to 'results/phase1_model_search/rf_codebert-base/model.pkl'
+Skipping Fine-Tuning steps. Evaluating Base Embeddings and Dirty Classifier.
+-- Step 9: Evaluate Classifier --
+ERROR: Could not assign labels to file. Not found. novel_crypto/deluxetiky_ESP8266ArduinoCrypto_Poly1305.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/unix-ninja_hackersandbox_md5.cpp
+ERROR: Could not assign labels to file. Not found. novel_crypto/DirtBagXon_hypseus-singe_md5.c
+ERROR: Could not assign labels to file. Not found. novel_crypto/fcorbelli_zpaqfranz_libzpaq.cpp
+Generated gorgeous interactive HTML evaluation report: results/phase1_model_search/rf_codebert-base/evaluation_report.html
+{'input_type': 'text', 'classifier_type': 'random_forest_classifier', 'best_f1_threshold': 0.671, 'best_f1_metrics': {'novel_crypto_tp': 45, 'novel_crypto_fn': 5, 'non_crypto_unrelated_tn': 48, 'non_crypto_unrelated_fp': 2, 'non_crypto_discarded_tn': 50, 'non_crypto_discarded_fp': 0}, 'min_fn_threshold': 0.271, 'min_fn_metrics': {'novel_crypto_tp': 50, 'novel_crypto_fn': 0, 'non_crypto_unrelated_tn': 28, 'non_crypto_unrelated_fp': 22, 'non_crypto_discarded_tn': 27, 'non_crypto_discarded_fp': 23}, 'min_fp_threshold': 0.961, 'min_fp_metrics': {'novel_crypto_tp': 15, 'novel_crypto_fn': 35, 'non_crypto_unrelated_tn': 50, 'non_crypto_unrelated_fp': 0, 'non_crypto_discarded_tn': 50, 'non_crypto_discarded_fp': 0}}

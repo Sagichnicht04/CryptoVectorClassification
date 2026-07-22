@@ -1,0 +1,5 @@
+experiment_id,embedding_model,chunk_size,overlap_proportion,overlap,classifier_type,status,runtime_sec,param_n_estimators,param_max_depth,param_min_samples_leaf,val_best_f1_threshold,val_tp,val_fn,val_fp,val_tn,val_precision,val_recall,val_f1,val_accuracy,val_min_fn_threshold,val_min_fn_fn_count,val_min_fn_recall,val_min_fp_threshold,val_min_fp_fp_count,param_learning_rate,param_batch_size,param_epochs
+1,microsoft/codebert-base,512,0.25,128,random_forest_classifier,success,33.81,100,10,1,0.581,48,2,5,95,0.9057,0.9600,0.9320,0.9533,0.172,0,1.0000,0.949,0,,,
+2,microsoft/codebert-base,512,0.25,128,neural_network_binary_classifier,success,29.45,,,,0.856,46,4,7,93,0.8679,0.9200,0.8932,0.9267,0.311,0,1.0000,0.980,0,0.001,32,50
+3,Salesforce/codet5-small,512,0.25,128,random_forest_classifier,success,28.89,100,10,1,0.552,42,8,4,96,0.9130,0.8400,0.8750,0.9200,0.220,0,1.0000,0.976,0,,,
+4,Salesforce/codet5-small,512,0.25,128,neural_network_binary_classifier,success,24.74,,,,0.804,46,4,9,91,0.8364,0.9200,0.8762,0.9133,0.022,0,1.0000,0.999,0,0.001,32,50
