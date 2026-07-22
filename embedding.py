@@ -3,7 +3,7 @@ import numpy as np
 import json
 import torch
 import torch.amp
-from transformers import AutoTokenizer, AutoModel
+from transformers import AutoTokenizer, AutoModel, BitsAndBytesConfig
 import config
 import torch.nn as nn
 import torch.optim as optim
@@ -27,17 +27,20 @@ class embedding_model:
             model_dir,
             )
 
+        # For large models, load in 8-bit to fit on consumer GPUs
+        quantization_config = BitsAndBytesConfig(load_in_8bit=True) if "7B" in model_dir or "15B" in model_dir else None
+        
         self.MODEL = AutoModel.from_pretrained(
             model_dir,
             use_safetensors=True,
-            #torch_dtype=torch.float16,
-            torch_dtype="auto",
-        ).cuda()
+            quantization_config=quantization_config,
+            device_map="auto"
+        )
 
         # Enable gradient checkpointing to save VRAM
         self.MODEL.gradient_checkpointing_enable()
 
-        self.DEVICE = torch.device("cuda")
+        self.DEVICE = getattr(self.MODEL, "device", torch.device("cuda" if torch.cuda.is_available() else "cpu"))
 
         self.OPTIMIZER = optim.Adam(
             self.MODEL.parameters(),
@@ -61,13 +64,15 @@ class embedding_model:
         return text
 
     def get_embedding(self, chunk):
+        # Truncate chunk if it somehow exceeds TOKEN_SIZE (safety check)
+        if chunk.size(0) > config.TOKEN_SIZE:
+            chunk = chunk[:config.TOKEN_SIZE]
 
-        padded_chunk = torch.full((config.TOKEN_SIZE,), self.TOKENIZER.pad_token_id, dtype=torch.long)
-        padded_chunk[:chunk.size(0)] = chunk
-        
+        # Use the actual length of the chunk without padding to config.TOKEN_SIZE.
+        # This completely avoids extreme memory usage and OOM with large TOKEN_SIZE (e.g. 16k or 32k context lengths).
         chunk_tokens = {
-            'input_ids': padded_chunk.unsqueeze(0).to(self.DEVICE),
-            'attention_mask': (padded_chunk != self.TOKENIZER.pad_token_id).unsqueeze(0).to(self.DEVICE)
+            'input_ids': chunk.unsqueeze(0).to(self.DEVICE),
+            'attention_mask': torch.ones((1, chunk.size(0)), dtype=torch.long, device=self.DEVICE)
         }
 
         with torch.no_grad():

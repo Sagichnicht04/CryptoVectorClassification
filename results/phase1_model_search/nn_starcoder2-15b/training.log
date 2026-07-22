@@ -1,0 +1,27 @@
+[transformers] Model config: bos_token_id must be `None` or an integer within the vocabulary (between 0 and 49151), got 50256. This may result in unexpected behavior.
+[transformers] Model config: eos_token_id must be `None` or an integer within the vocabulary (between 0 and 49151), got 50256. This may result in unexpected behavior.
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/643 [00:00<?, ?it/s]Loading weights:   0%|          | 1/643 [00:00<02:32,  4.20it/s]Loading weights:   1%|          | 5/643 [00:00<00:39, 16.00it/s]Loading weights:   1%|          | 8/643 [00:00<00:32, 19.59it/s]Loading weights:   3%|▎         | 21/643 [00:00<00:14, 42.78it/s]Loading weights:   4%|▍         | 26/643 [00:00<00:14, 42.77it/s]Loading weights:   6%|▌         | 37/643 [00:00<00:12, 49.68it/s]Loading weights:   7%|▋         | 42/643 [00:01<00:12, 47.88it/s]Loading weights:   8%|▊         | 53/643 [00:01<00:11, 52.97it/s]Loading weights:   9%|▉         | 59/643 [00:01<00:11, 52.49it/s]Loading weights:  11%|█         | 69/643 [00:01<00:10, 52.40it/s]Loading weights:  12%|█▏        | 75/643 [00:01<00:11, 48.49it/s]Loading weights: 100%|██████████| 643/643 [00:01<00:00, 355.25it/s]
+[transformers] [1mStarcoder2Model LOAD REPORT[0m from: bigcode/starcoder2-15b
+Key            | Status     |  | 
+---------------+------------+--+-
+lm_head.weight | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+Some parameters are on the meta device because they were offloaded to the disk and cpu.
+-- Step 1: Preparing Data --
+Skipped
+-- Step 2: Chunk Data --
+Loaded Cached Chunks from Disk
+-- Step 3: Base Embed Chunks --
+Traceback (most recent call last):
+  File "/home/flo/Documents/MyVectorClassification/run_workflow.py", line 118, in <module>
+    chunk_tokens, embedding = base_embedding.get_embedding(chunk)
+                              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^
+  File "/home/flo/Documents/MyVectorClassification/embedding.py", line 65, in get_embedding
+    padded_chunk = torch.full((config.TOKEN_SIZE,), self.TOKENIZER.pad_token_id, dtype=torch.long)
+TypeError: full() received an invalid combination of arguments - got (tuple, NoneType, dtype=torch.dtype), but expected one of:
+ * (tuple of ints size, Number fill_value, *, tuple of names names, torch.dtype dtype = None, torch.layout layout = None, torch.device device = None, bool pin_memory = False, bool requires_grad = False)
+ * (tuple of ints size, Number fill_value, *, Tensor out = None, torch.dtype dtype = None, torch.layout layout = None, torch.device device = None, bool pin_memory = False, bool requires_grad = False)
+

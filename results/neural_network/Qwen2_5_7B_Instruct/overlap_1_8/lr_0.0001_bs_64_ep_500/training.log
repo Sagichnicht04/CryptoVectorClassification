@@ -1,0 +1,48 @@
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/338 [00:00<?, ?it/s]Loading weights:   0%|          | 1/338 [00:00<01:13,  4.61it/s]Loading weights:   1%|          | 3/338 [00:00<00:34,  9.63it/s]Loading weights:   1%|▏         | 5/338 [00:00<00:38,  8.58it/s]Loading weights:   4%|▍         | 15/338 [00:00<00:12, 25.05it/s]Loading weights:   5%|▌         | 18/338 [00:01<00:16, 19.38it/s]Loading weights:   8%|▊         | 27/338 [00:01<00:11, 28.15it/s]Loading weights:   9%|▉         | 31/338 [00:01<00:13, 23.29it/s]Loading weights:  12%|█▏        | 39/338 [00:01<00:10, 28.68it/s]Loading weights:  13%|█▎        | 43/338 [00:01<00:12, 24.05it/s]Loading weights:  15%|█▌        | 51/338 [00:02<00:09, 29.05it/s]Loading weights:  16%|█▋        | 55/338 [00:02<00:11, 24.32it/s]Loading weights:  19%|█▊        | 63/338 [00:02<00:09, 29.45it/s]Loading weights:  20%|█▉        | 67/338 [00:02<00:10, 24.77it/s]Loading weights:  22%|██▏       | 75/338 [00:03<00:08, 29.77it/s]Loading weights:  23%|██▎       | 79/338 [00:03<00:10, 25.02it/s]Loading weights:  26%|██▌       | 87/338 [00:03<00:08, 29.93it/s]Loading weights:  27%|██▋       | 91/338 [00:03<00:09, 25.15it/s]Loading weights:  29%|██▉       | 99/338 [00:03<00:07, 29.89it/s]Loading weights:  30%|███       | 103/338 [00:04<00:09, 24.92it/s]Loading weights:  33%|███▎      | 111/338 [00:04<00:07, 29.62it/s]Loading weights:  34%|███▍      | 115/338 [00:04<00:09, 24.62it/s]Loading weights:  36%|███▋      | 123/338 [00:04<00:07, 29.15it/s]Loading weights:  38%|███▊      | 127/338 [00:05<00:08, 24.56it/s]Loading weights:  40%|███▉      | 135/338 [00:05<00:06, 29.32it/s]Loading weights:  41%|████      | 139/338 [00:05<00:08, 24.43it/s]Loading weights:  43%|████▎     | 147/338 [00:05<00:06, 29.37it/s]Loading weights:  45%|████▍     | 151/338 [00:05<00:07, 24.62it/s]Loading weights:  47%|████▋     | 159/338 [00:06<00:06, 29.44it/s]Loading weights:  48%|████▊     | 163/338 [00:06<00:07, 24.69it/s]Loading weights:  51%|█████     | 171/338 [00:06<00:05, 29.55it/s]Loading weights:  52%|█████▏    | 175/338 [00:06<00:06, 24.91it/s]Loading weights:  54%|█████▍    | 183/338 [00:06<00:05, 29.86it/s]Loading weights:  55%|█████▌    | 187/338 [00:07<00:06, 25.12it/s]Loading weights:  58%|█████▊    | 195/338 [00:07<00:04, 30.09it/s]Loading weights:  59%|█████▉    | 199/338 [00:07<00:05, 25.24it/s]Loading weights:  61%|██████    | 207/338 [00:07<00:04, 29.79it/s]Loading weights:  62%|██████▏   | 211/338 [00:08<00:05, 25.10it/s]Loading weights:  65%|██████▍   | 219/338 [00:08<00:03, 30.05it/s]Loading weights:  66%|██████▌   | 223/338 [00:08<00:04, 25.26it/s]Loading weights:  68%|██████▊   | 231/338 [00:08<00:03, 30.18it/s]Loading weights:  70%|██████▉   | 235/338 [00:08<00:04, 25.22it/s]Loading weights:  72%|███████▏  | 243/338 [00:09<00:03, 30.13it/s]Loading weights:  73%|███████▎  | 247/338 [00:09<00:03, 25.27it/s]Loading weights:  75%|███████▌  | 255/338 [00:09<00:02, 30.19it/s]Loading weights:  77%|███████▋  | 259/338 [00:09<00:03, 25.19it/s]Loading weights:  79%|███████▉  | 267/338 [00:10<00:02, 29.96it/s]Loading weights:  80%|████████  | 271/338 [00:10<00:02, 25.20it/s]Loading weights:  83%|████████▎ | 279/338 [00:10<00:01, 30.11it/s]Loading weights:  84%|████████▎ | 283/338 [00:10<00:02, 25.10it/s]Loading weights:  86%|████████▌ | 291/338 [00:10<00:01, 29.85it/s]Loading weights:  87%|████████▋ | 295/338 [00:11<00:01, 25.04it/s]Loading weights:  90%|████████▉ | 303/338 [00:11<00:01, 29.93it/s]Loading weights:  91%|█████████ | 307/338 [00:11<00:01, 25.17it/s]Loading weights:  93%|█████████▎| 315/338 [00:11<00:00, 29.97it/s]Loading weights:  94%|█████████▍| 319/338 [00:12<00:00, 25.03it/s]Loading weights:  97%|█████████▋| 327/338 [00:12<00:00, 29.89it/s]Loading weights:  98%|█████████▊| 331/338 [00:12<00:00, 25.09it/s]Loading weights: 100%|██████████| 338/338 [00:12<00:00, 26.97it/s]
+[transformers] [1mQwen2Model LOAD REPORT[0m from: Qwen/Qwen2.5-7B-Instruct
+Key            | Status     |  | 
+---------------+------------+--+-
+lm_head.weight | UNEXPECTED |  | 
+
+Notes:
+- UNEXPECTED:	can be ignored when loading from different task/architecture; not ok if you expect identical arch.
+-- Step 1: Preparing Data --
+Skipped
+-- Step 2: Chunk Data --
+Loaded Cached Chunks from Disk
+-- Step 3: Base Embed Chunks --
+Loaded Cached Embeddings from Disk
+-- Step 4: Train dirty Classifier --
+  Training BCE Classifier on 324 crypto chunks and 950 non-crypto chunks…
+    Epoch 1/500 - Loss: 0.5039
+    Epoch 20/500 - Loss: 0.1150
+    Epoch 40/500 - Loss: 0.0795
+    Epoch 60/500 - Loss: 0.0588
+    Epoch 80/500 - Loss: 0.0452
+    Epoch 100/500 - Loss: 0.0359
+    Epoch 120/500 - Loss: 0.0290
+    Epoch 140/500 - Loss: 0.0236
+    Epoch 160/500 - Loss: 0.0192
+    Epoch 180/500 - Loss: 0.0161
+    Epoch 200/500 - Loss: 0.0131
+    Epoch 220/500 - Loss: 0.0110
+    Epoch 240/500 - Loss: 0.0092
+    Epoch 260/500 - Loss: 0.0078
+    Epoch 280/500 - Loss: 0.0067
+    Epoch 300/500 - Loss: 0.0057
+    Epoch 320/500 - Loss: 0.0048
+    Epoch 340/500 - Loss: 0.0041
+    Epoch 360/500 - Loss: 0.0035
+    Epoch 380/500 - Loss: 0.0030
+    Epoch 400/500 - Loss: 0.0026
+    Epoch 420/500 - Loss: 0.0022
+    Epoch 440/500 - Loss: 0.0019
+    Epoch 460/500 - Loss: 0.0016
+    Epoch 480/500 - Loss: 0.0014
+    Epoch 500/500 - Loss: 0.0012
+  BCE classifier saved to 'results/neural_network/Qwen2_5_7B_Instruct/overlap_1_8/lr_0.0001_bs_64_ep_500/model.pt'
+Skipping Fine-Tuning steps. Evaluating Base Embeddings and Dirty Classifier.
+-- Step 9: Evaluate Classifier --
+Generated gorgeous interactive HTML evaluation report: results/neural_network/Qwen2_5_7B_Instruct/overlap_1_8/lr_0.0001_bs_64_ep_500/evaluation_report.html
+{'input_type': 'text', 'classifier_type': 'neural_network_binary_classifier', 'best_f1_threshold': 0.211, 'best_f1_metrics': {'novel_crypto_tp': 50, 'novel_crypto_fn': 0, 'non_crypto_unrelated_tn': 45, 'non_crypto_unrelated_fp': 5, 'non_crypto_discarded_tn': 46, 'non_crypto_discarded_fp': 4}, 'min_fn_threshold': 0.211, 'min_fn_metrics': {'novel_crypto_tp': 50, 'novel_crypto_fn': 0, 'non_crypto_unrelated_tn': 45, 'non_crypto_unrelated_fp': 5, 'non_crypto_discarded_tn': 46, 'non_crypto_discarded_fp': 4}, 'min_fp_threshold': 0.996, 'min_fp_metrics': {'novel_crypto_tp': 38, 'novel_crypto_fn': 12, 'non_crypto_unrelated_tn': 47, 'non_crypto_unrelated_fp': 3, 'non_crypto_discarded_tn': 50, 'non_crypto_discarded_fp': 0}}

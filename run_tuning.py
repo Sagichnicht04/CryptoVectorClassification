@@ -59,6 +59,9 @@ MODEL_CONTEXT_LENGTHS = {{
 }}
 
 TOKEN_SIZE = MODEL_CONTEXT_LENGTHS.get(MODEL_NAME, 512)
+# Reduce token size for large models to avoid OOM, while still using a reasonably large context
+if "7B" in MODEL_NAME or "15B" in MODEL_NAME:
+    TOKEN_SIZE = 8192
 OVERLAP_PROPORTION = {overlap_proportion}
 OVERLAP = int(TOKEN_SIZE * OVERLAP_PROPORTION)
 
@@ -253,7 +256,6 @@ try:
             "microsoft/codebert-base",
             "Salesforce/codet5-small",
             "Qwen/Qwen2.5-7B-Instruct",
-            "bigcode/starcoder2-15b"
         ]
         
         model_scores = {}
