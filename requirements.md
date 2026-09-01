@@ -1,0 +1,9 @@
+-> CLI Tool läuft überall
+-> Anleitung zum Installieren
+-> GPU mit Fallback auf CPU
+-> Explainability
+-> Threshold einfach anpassbar
+-> Caching! Mit Hashes arbeiten, Hashes vergleichen bevor embedded wird
+-> Exclusion List (File?, Regex?)
+-> Erwartete Zeit Remaining
+-> Claude Anbindung?
