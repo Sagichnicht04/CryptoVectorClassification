@@ -38,15 +38,21 @@ def get_lang_from_path(path):
 
 def get_embedded_files_hashes(args):
     cache_dir = Path(args.cache_dir)
+    embedded_files = Path.joinpath(cache_dir, "embedded_files.pkl")
+    return torch.load(embedded_files,weights_only=False)
+    
+def get_embedded_files(args):
+    cache_dir = Path(args.cache_dir)
     embedded_files_hashes = Path.joinpath(cache_dir, "embedded_files_hashes.json")
     with open(embedded_files_hashes, "r") as f:
         return json.load(f)
-
-def get_uncached_files(args):
+    
+def load_target_hashes(args):
     init_cache(args)
-    embedded_files_hashes = get_embedded_files_hashes(args)
-    all_files = {}
 
+    embedded_files_hashes = get_embedded_files_hashes(args) if not args.no_cache else []
+    uncached_hashes = {}
+    cached_hashes = {}
     for root, _, files in os.walk(args.target):
         for filename in files:
             path = os.path.join(root, filename)
@@ -54,8 +60,9 @@ def get_uncached_files(args):
             if lang or args.include_non_c_files:
                 hash = get_md5_hash(path)
                 if hash not in embedded_files_hashes:
-                    all_files[hash] = path
-    return all_files
+                    if not args.only_cache:
+                        uncached_hashes[hash] = path
+                else:
+                    cached_hashes[hash] = path
 
-def load_files(args):
-    pass
+    return (uncached_hashes, cached_hashes)

@@ -6,10 +6,10 @@ import torch
 import random
 import json
 from evaluate import evaluation
-from cache import get_uncached_files
+from cache import load_target_hashes
 
 def inference(args):
-    print(get_uncached_files(args))
+    print(load_target_hashes(args))
 
 def ignore():
 
