@@ -15,11 +15,11 @@ def init_cache(args):
         folder = Path(args.cache_dir)
         folder.mkdir(parents=True, exist_ok=True)
 
-    if not embedded_files_hashes.exists():
+    if not embedded_files_hashes.exists() or args.reset_cache:
         with open(embedded_files_hashes, "w") as f:
             f.write("[]")
 
-    if not embedded_files.exists():
+    if not embedded_files.exists() or args.reset_cache:
         torch.save({}, embedded_files)
 
 def get_md5_hash(file_path):
@@ -46,7 +46,17 @@ def get_embedded_files(args):
     cache_dir = Path(args.cache_dir)
     embedded_files = Path.joinpath(cache_dir, "embedded_files.pkl")
     return torch.load(embedded_files, weights_only=False)
+
+def update_cache(args, new_cache):
+    cache_dir = Path(args.cache_dir)
+    embedded_files = Path.joinpath(cache_dir, "embedded_files.pkl")
+    torch.save(new_cache, embedded_files)
     
+    embedded_files_hashes = Path.joinpath(cache_dir, "embedded_files_hashes.json")
+    with open(embedded_files_hashes, "w") as f:
+        json.dump(list(new_cache.keys()),f)
+
+        
 def load_target_hashes(args):
     init_cache(args)
 
@@ -65,11 +75,13 @@ def load_target_hashes(args):
                 else:
                     cached_hashes[hash] = path
 
+    embedded_files = get_embedded_files(args)
+
     if len(uncached_hashes) > 0:
         from process_file import file_processor
         processor = file_processor(args)
-        uncached_files = {}
         for uncached_hash in uncached_hashes:
-            uncached_files[uncached_hash] = processor.get_embeddings_for_file(uncached_hash)
+            embedded_files[uncached_hash] = processor.get_embeddings_for_file(uncached_hash)
+        update_cache(args, embedded_files)
 
-    return (uncached_hashes, cached_hashes)
+    return embedded_files

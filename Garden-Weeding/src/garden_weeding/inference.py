@@ -1,18 +1,13 @@
-import subprocess
-from embedding import embedding_model
-from classifier import get_classifier
+#from classifier import get_classifier
 import os
 import random
 import json
-from evaluate import evaluation
+#from evaluate import evaluation
 from cache import load_target_hashes
 
 def inference(args):
-    hashes = load_target_hashes(args)
-    uncached_hashes = hashes[0]
-    cached_hashes = hashes[1]
-    print(cached_hashes)
-    print(uncached_hashes)
+    embedded_files = load_target_hashes(args)
+    print(embedded_files)
 
         
 
