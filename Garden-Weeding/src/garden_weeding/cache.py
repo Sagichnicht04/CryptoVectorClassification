@@ -57,6 +57,21 @@ def update_cache(args, new_cache):
     with open(embedded_files_hashes, "w") as f:
         json.dump(list(new_cache.keys()),f)
 
+def map_training_data(args):
+    results = {"positives":[], "negatives":[]}
+
+    for root, _, files in os.walk(args.positives):
+        for filename in files:
+            path = os.path.join(root, filename)
+            hash = get_md5_hash(path)
+            results["positives"].append(hash)
+
+    for root, _, files in os.walk(args.negatives):
+        for filename in files:
+            path = os.path.join(root, filename)
+            hash = get_md5_hash(path)
+            results["negatives"].append(hash)
+    return results
         
 def load_uncached_hashes(args):
     init_cache(args)

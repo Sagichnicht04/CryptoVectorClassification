@@ -4,6 +4,7 @@ from pathlib import Path
 from cache import update_cache
 from cache import get_embedded_files
 from cache import load_uncached_hashes
+from cache import map_training_data
 import time
 
 home = Path.home()
@@ -93,6 +94,18 @@ def main():
                 print(f"{embedded_files[embedded_file]["path"]} is crypto {max(embedded_files[embedded_file]["probabilities"])}")
             else:
                 print(f"{embedded_files[embedded_file]["path"]} is not crypto {max(embedded_files[embedded_file]["probabilities"])}")
+    else:
+        mapped = map_training_data(args)
+        crypto_embeddings = []
+        non_crypto_embeddings = []
+        for hash in mapped["positives"]:
+            crypto_embeddings.append(embedded_files[hash]["embedding"])
+        for hash in mapped["negatives"]:
+            non_crypto_embeddings.append(embedded_files[hash]["embedding"])
+
+
+        classifier = RandomForestClassifier(args)
+        classifier.train(crypto_embeddings, non_crypto_embeddings)
 
 if __name__ == "__main__":
     main()
