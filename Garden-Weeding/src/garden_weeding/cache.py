@@ -65,4 +65,11 @@ def load_target_hashes(args):
                 else:
                     cached_hashes[hash] = path
 
+    if len(uncached_hashes) > 0:
+        from process_file import file_processor
+        processor = file_processor(args)
+        uncached_files = {}
+        for uncached_hash in uncached_hashes:
+            uncached_files[uncached_hash] = processor.get_embeddings_for_file(uncached_hash)
+
     return (uncached_hashes, cached_hashes)

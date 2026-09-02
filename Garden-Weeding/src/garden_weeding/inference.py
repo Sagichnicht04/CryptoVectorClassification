@@ -14,6 +14,8 @@ def inference(args):
     print(cached_hashes)
     print(uncached_hashes)
 
+        
+
 def ignore():
 
     _effective_gpu = bool(getattr(config, "USE_GPU", True)) and torch.cuda.is_available()
