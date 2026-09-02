@@ -8,8 +8,8 @@ import hashlib
 
 def init_cache(args):
     cache_dir = Path(args.cache_dir)
-    embedded_files_hashes = Path.joinpath(cache_dir, "embedded_files_hashes.json")
-    embedded_files = Path.joinpath(cache_dir, "embedded_files.pkl")
+    embedded_files_hashes = Path.joinpath(cache_dir, f"{get_cache_identifier(args)}_embedded_files_hashes.json")
+    embedded_files = Path.joinpath(cache_dir, f"{get_cache_identifier(args)}_embedded_files.pkl")
 
     if not cache_dir.exists():
         folder = Path(args.cache_dir)
@@ -36,33 +36,35 @@ def get_lang_from_path(path):
         return 'cpp'
     return None
 
+def get_cache_identifier(args):
+    return hashlib.md5(f"{args.token_size}_{args.chunk_overlap_size}_{args.embedding_model_name}".encode()).hexdigest()
+
 def get_embedded_files_hashes(args):
     cache_dir = Path(args.cache_dir)
-    embedded_files_hashes = Path.joinpath(cache_dir, "embedded_files_hashes.json")
+    embedded_files_hashes = Path.joinpath(cache_dir, f"{get_cache_identifier(args)}_embedded_files_hashes.json")
     with open(embedded_files_hashes, "r") as f:
         return json.load(f)
 
 def get_embedded_files(args):
     cache_dir = Path(args.cache_dir)
-    embedded_files = Path.joinpath(cache_dir, "embedded_files.pkl")
+    embedded_files = Path.joinpath(cache_dir, f"{get_cache_identifier(args)}_embedded_files.pkl")
     return torch.load(embedded_files, weights_only=False)
 
 def update_cache(args, new_cache):
     cache_dir = Path(args.cache_dir)
-    embedded_files = Path.joinpath(cache_dir, "embedded_files.pkl")
+    embedded_files = Path.joinpath(cache_dir, f"{get_cache_identifier(args)}_embedded_files.pkl")
     torch.save(new_cache, embedded_files)
     
-    embedded_files_hashes = Path.joinpath(cache_dir, "embedded_files_hashes.json")
+    embedded_files_hashes = Path.joinpath(cache_dir, f"{get_cache_identifier(args)}_embedded_files_hashes.json")
     with open(embedded_files_hashes, "w") as f:
         json.dump(list(new_cache.keys()),f)
 
         
-def load_target_hashes(args):
+def load_uncached_hashes(args):
     init_cache(args)
 
     embedded_files_hashes = get_embedded_files_hashes(args) if not args.no_cache else []
     uncached_hashes = {}
-    cached_hashes = {}
     for root, _, files in os.walk(args.target):
         for filename in files:
             path = os.path.join(root, filename)
@@ -72,16 +74,5 @@ def load_target_hashes(args):
                 if hash not in embedded_files_hashes:
                     if not args.only_cache:
                         uncached_hashes[hash] = path
-                else:
-                    cached_hashes[hash] = path
 
-    embedded_files = get_embedded_files(args)
-
-    if len(uncached_hashes) > 0:
-        from process_file import file_processor
-        processor = file_processor(args)
-        for uncached_hash in uncached_hashes:
-            embedded_files[uncached_hash] = processor.get_embeddings_for_file(uncached_hash)
-        update_cache(args, embedded_files)
-
-    return embedded_files
+    return uncached_hashes

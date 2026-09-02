@@ -1,6 +1,11 @@
 import argparse
 from inference import inference
 from pathlib import Path
+from cache import update_cache
+from cache import get_embedded_files
+from cache import load_uncached_hashes
+import time
+
 home = Path.home()
 
 def main():
@@ -39,9 +44,33 @@ def main():
 
     print(args)
 
+    uncached_hashes = load_uncached_hashes(args)
+    print(uncached_hashes)
+
+    embedded_files = get_embedded_files(args)
+
+
+    if len(uncached_hashes) > 0:
+        from process_file import file_processor
+        processor = file_processor(args)
+
+        embedding_times = [3 if processor.USE_GPU else 120]
+        for uncached_hash in uncached_hashes:
+            print(f"\rEstimated time left: {int(sum(embedding_times) / len(embedding_times)) * len(uncached_hashes)} seconds. Embedding file {uncached_hashes[uncached_hash]}",end="")
+            start = time.time()
+            with open(uncached_hashes[uncached_hash], "r", encoding='utf-8', errors="replace") as f:
+                embedded_files[uncached_hash] = processor.get_embeddings_for_file(f.read())
+            embedding_times.append(time.time() - start)
+        update_cache(args, embedded_files)
+
+
     if args.verbose:
         print("Verbose mode enabled")
     if not args.train:
+
+        
+
+
         inference(args)
 
 if __name__ == "__main__":

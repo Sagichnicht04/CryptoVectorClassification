@@ -3,13 +3,9 @@ import os
 import random
 import json
 #from evaluate import evaluation
-from cache import load_target_hashes
 
 def inference(args):
-    embedded_files = load_target_hashes(args)
-    print(embedded_files)
-
-        
+    pass        
 
 def ignore():
 

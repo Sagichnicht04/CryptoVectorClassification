@@ -8,6 +8,7 @@ from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, Pe
 import torch.nn as nn
 import torch.optim as optim
 from huggingface_hub import snapshot_download
+import logging
 
 
 os.environ["HF_HOME"] = os.path.join(os.getcwd(), "hf_cache")
@@ -17,7 +18,10 @@ os.environ["HF_HUB_OFFLINE"] = "1"
 class file_processor:
     def __init__(self, args):
         self.ARGS = args
-        use_gpu = args.force_gpu or (not args.force_cpu and torch.cuda.is_available())
+        self.USE_GPU = args.force_gpu or (not args.force_cpu and torch.cuda.is_available())
+        if not self.ARGS.verbose:
+            logging.getLogger("transformers").setLevel(logging.ERROR)
+
 
         model_dir = snapshot_download(args.embedding_model_name)
         
@@ -45,7 +49,7 @@ class file_processor:
                 "use_safetensors": True,
                 "quantization_config": quantization_config,
             }
-            if use_gpu:
+            if self.USE_GPU:
                 load_kwargs["device_map"] = "auto"
             else:
                 # Explicit CPU load: keep everything on CPU in fp32 to avoid any
@@ -53,7 +57,7 @@ class file_processor:
                 load_kwargs["torch_dtype"] = torch.float32
 
             base_model = AutoModel.from_pretrained(base_model_dir, **load_kwargs)
-            if not use_gpu:
+            if not self.USE_GPU:
                 base_model = base_model.to("cpu")
             base_model.gradient_checkpointing_enable()
 
@@ -76,13 +80,13 @@ class file_processor:
                 "use_safetensors": True,
                 "quantization_config": quantization_config,
             }
-            if use_gpu:
+            if self.USE_GPU:
                 load_kwargs["device_map"] = "auto"
             else:
                 load_kwargs["torch_dtype"] = torch.float32
 
             self.MODEL = AutoModel.from_pretrained(model_dir, **load_kwargs)
-            if not use_gpu:
+            if not self.USE_GPU:
                 self.MODEL = self.MODEL.to("cpu")
 
             # Prepare model for PEFT LoRA training
@@ -100,7 +104,7 @@ class file_processor:
             else:
                 self.MODEL.gradient_checkpointing_enable()
 
-        if use_gpu:
+        if self.USE_GPU:
             self.DEVICE = getattr(self.MODEL, "device", torch.device("cuda"))
         else:
             self.DEVICE = torch.device("cpu")
