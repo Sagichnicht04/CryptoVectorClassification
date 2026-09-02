@@ -63,14 +63,18 @@ def load_uncached_hashes(args):
 
     embedded_files_hashes = get_embedded_files_hashes(args) if not args.no_cache else []
     uncached_hashes = {}
-    for root, _, files in os.walk(args.target):
-        for filename in files:
-            path = os.path.join(root, filename)
-            lang = get_lang_from_path(path)
-            if lang or args.include_non_c_files:
-                hash = get_md5_hash(path)
-                if hash not in embedded_files_hashes:
-                    if not args.only_cache:
-                        uncached_hashes[hash] = path
+    targets = [args.target]
+    if args.train:
+        targets = [args.positives, args.negatives]
+    for target in targets:
+        for root, _, files in os.walk(target):
+            for filename in files:
+                path = os.path.join(root, filename)
+                lang = get_lang_from_path(path)
+                if lang or args.include_non_c_files:
+                    hash = get_md5_hash(path)
+                    if hash not in embedded_files_hashes:
+                        if not args.only_cache:
+                            uncached_hashes[hash] = path
 
     return uncached_hashes

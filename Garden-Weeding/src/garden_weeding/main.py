@@ -1,5 +1,5 @@
 import argparse
-from inference import RandomForestClassifier
+from classifier import RandomForestClassifier
 from pathlib import Path
 from cache import update_cache
 from cache import get_embedded_files
