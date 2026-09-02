@@ -2,14 +2,17 @@ import subprocess
 from embedding import embedding_model
 from classifier import get_classifier
 import os
-import torch
 import random
 import json
 from evaluate import evaluation
 from cache import load_target_hashes
 
 def inference(args):
-    print(load_target_hashes(args))
+    hashes = load_target_hashes(args)
+    uncached_hashes = hashes[0]
+    cached_hashes = hashes[1]
+    print(cached_hashes)
+    print(uncached_hashes)
 
 def ignore():
 
