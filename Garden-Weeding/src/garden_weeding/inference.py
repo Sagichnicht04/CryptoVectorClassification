@@ -1,131 +1,50 @@
-#from classifier import get_classifier
 import os
-import random
 import json
-#from evaluate import evaluation
+import pickle
+import numpy as np
 
-def inference(args):
-    pass        
+class RandomForestClassifier:
+    """
+    Random Forest trained on labelled embedding vectors.
 
-def ignore():
+    Label convention:  1 = crypto,  0 = non-crypto.
+    """
 
-    _effective_gpu = bool(getattr(config, "USE_GPU", True)) and torch.cuda.is_available()
-    print(f"-- Runtime device: {'GPU (CUDA)' if _effective_gpu else 'CPU'}"
-        f" (config.USE_GPU={getattr(config, 'USE_GPU', True)}, cuda.available={torch.cuda.is_available()}) --")
-
-    base_embedding = embedding_model(config.MODEL_NAME)
-    detected_crypto_chunks = []
-
-
-    updated_files = []
-    for root, _, files in os.walk(config.DATA_DIR):
-        for filename in files:
-            path = os.path.join(root, filename)
-            updated_files.append(path)
-
-    def get_lang_from_path(path):
-        if path.endswith('.c'):
-            return 'c'
-        if path.endswith(('.cpp', '.cc', '.cxx')):
-            return 'cpp'
-        return None
-
-    print("-- Step 2: Chunk Data --")
-    chunks = {}
-    if config.CHUNK_DATA:
-        all_files = []
-
-        chunk_counter = 0
-        file_counter = 0
-        for root, _, files in os.walk(config.DATA_DIR):
-            for filename in files:
-                path = os.path.join(root, filename)
-                lang = get_lang_from_path(path)
-                if lang:
-                    new_path = "/".join(path.split("/")[::-1][0:4][::-1])
-                    all_files.append((new_path, lang))
-                    
-                    with open(path, "r", encoding='utf-8', errors="replace") as f:
-                        content = f.read()
-
-                    representation = content
-
-                    # Tokenize the entire representation
-                    tokens = base_embedding.TOKENIZER(
-                        representation,
-                        return_tensors="pt",
-                        padding=False,
-                        truncation=False
-                    )
-
-                    input_ids = tokens['input_ids'].squeeze()
-
-                    
-                    # Define chunk size and overlap
-                    chunk_size = config.TOKEN_SIZE
-                    overlap = config.OVERLAP
-                    stride = chunk_size - overlap
-
-                    # Create overlapping chunks
-                    chunks_of_file = [
-                        input_ids[i:i + chunk_size]
-                        for i in range(0, input_ids.size(0), stride)
-                    ]
-                    chunks[new_path] = chunks_of_file
-                    chunk_counter += len(chunks_of_file)
-                    file_counter += 1
-                    print(f"\rProcessed: {file_counter*100/len(files)}%", end="", flush=True)
+    def __init__(self, args):
+        self.model = None
+        self.path = args.classifier_file
+        if not os.path.exists(self.path):
+            raise RuntimeError("RandomForestClassifier not found")
+        
+        try:
+            with open(self.path, "rb") as f:
+                self.model = pickle.load(f)
+        except:
+            raise RuntimeError("Error loading RandomForestClassifier")
+        
+    def predict_proba(self, embeddings: list) -> np.ndarray:
+        """
+        Returns the class probabilities for each chunk embedding.
+        """
+        if self.model is None:
+            raise RuntimeError("RandomForestClassifier has not been trained/loaded.")
+        
+        if not embeddings:
+            return np.array([])
 
 
-        torch.save(chunks, config.CHUNKS_PATH)
-        print(f"Saved chunks for {len(chunks)} files to disk ({chunk_counter} chunks)")
+        X = np.vstack(embeddings)
+        probs = self.model.predict_proba(X)
 
-    else:
-        chunks = torch.load(config.CHUNKS_PATH,weights_only=False)
-        print("Loaded Cached Chunks from Disk")
+        crypto_probs = []
+        for prob in probs:
+            crypto_probs.append(prob[1])
 
-
-    print("-- Step 3: Base Embed Chunks --")
-    base_embedded_chunks = {}
-
-    try:
-        base_embedded_chunks = torch.load(config.BASE_EMBEDDINGS_PATH,weights_only=False)
-        print("Loaded Cached Embeddings from Disk")
-    except:
-        print("No Cached Embeddings Found")
-
-    if config.BASE_EMBED_CHUNKS:
-        file_counter = 0
-        for file in chunks:
-            if file in base_embedded_chunks:
-                continue
-            embedding_counter = 0
-            file_counter += 1
-            base_embedded_chunks[file] = []
-            for chunk in chunks[file]:
-                chunk_tokens, embedding = base_embedding.get_embedding(chunk)
-                base_embedded_chunks[file].append({
-                    "chunk_tokens":chunk_tokens,
-                    "embedding": embedding
-                })
-                embedding_counter += 1
-                print(f"\rEmbedding file {file} ({file_counter}/{len(chunks)}) | Chunk {embedding_counter}/{len(chunks[file])} | ", end="", flush=True,
-                )
-
-        print()
-        torch.save(base_embedded_chunks, config.BASE_EMBEDDINGS_PATH)
-        print(f"Saved embeddings for {len(base_embedded_chunks)} files to disk")
-    else:
-        base_embedded_chunks = torch.load(config.BASE_EMBEDDINGS_PATH,weights_only=False)
-        print("Loaded Cached Embeddings from Disk")
-
-    l = list(base_embedded_chunks.items())
-    random.shuffle(l)
-    base_embedded_chunks = dict(l)
+        return crypto_probs
 
 
-    print("-- Step 4: Load dirty Classifier --")
-    dirty_classifier = get_classifier("random_forest_classifier", config.DIRTY_CLASSIFIER_PATH,
+def inference(args, embeddings):
+    classifier = get_classifier("random_forest_classifier", config.DIRTY_CLASSIFIER_PATH,
                                         {
                                             "n_estimators": 200,
                                             "max_depth": 12,

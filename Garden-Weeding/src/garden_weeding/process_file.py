@@ -186,12 +186,11 @@ class file_processor:
             for i in range(0, input_ids.size(0), stride)
         ]
 
-        embedded_chunks = []
+        embedded_chunks = {"chunk_tokens":[], "embedding": []}
 
         for chunk in chunks_of_file:
             chunk_tokens, embedding = self.get_embedding(chunk)
-            embedded_chunks.append({
-                "chunk_tokens":chunk_tokens,
-                "embedding": embedding
-            })
+            embedded_chunks["chunk_tokens"].append(chunk_tokens)
+            embedded_chunks["embedding"].append(embedding)
+
         return embedded_chunks

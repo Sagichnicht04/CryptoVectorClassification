@@ -4,8 +4,6 @@ import torch
 import json
 import hashlib
 
-
-
 def init_cache(args):
     cache_dir = Path(args.cache_dir)
     embedded_files_hashes = Path.joinpath(cache_dir, f"{get_cache_identifier(args)}_embedded_files_hashes.json")
