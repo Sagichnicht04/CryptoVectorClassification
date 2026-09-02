@@ -5,7 +5,6 @@ import torch
 import torch.amp
 from transformers import AutoTokenizer, AutoModel, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, PeftModel
-import config
 import torch.nn as nn
 import torch.optim as optim
 
