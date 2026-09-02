@@ -56,3 +56,6 @@ def get_uncached_files(args):
                 if hash not in embedded_files_hashes:
                     all_files[hash] = path
     return all_files
+
+def load_files(args):
+    pass
