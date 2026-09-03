@@ -312,8 +312,8 @@ def test_update_cache_persists_pickle_and_hashes(workspace):
     cache.init_cache(args)
 
     payload = {
-        "aa": {"embedding": [1, 2, 3], "path": "/somewhere/a.c"},
-        "bb": {"embedding": [4, 5, 6], "path": "/somewhere/b.cpp"},
+        "aa": {"embedding": [1, 2, 3], "path": str(workspace["target"] / "a.c")},
+        "bb": {"embedding": [4, 5, 6], "path": str(workspace["target"] / "b.cpp")},
     }
     cache.update_cache(args, payload)
 
@@ -925,4 +925,113 @@ def test_get_embedded_files_empty_cache_with_exclusion(workspace):
     cache.init_cache(args)
 
     assert cache.get_embedded_files(args) == {}
+
+
+# --------------------------------------------------------------------------- #
+# get_embedded_files filters by target directory (not just exclusion patterns)
+# --------------------------------------------------------------------------- #
+def test_get_embedded_files_only_returns_files_under_target(workspace):
+    """Cached files that are NOT under args.target must be filtered out,
+    even when no exclusion patterns are active."""
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+    )
+    cache.init_cache(args)
+
+    outside_path = str(workspace["tmp_path"] / "other_project" / "lib.c")
+
+    payload = {
+        "aa": {"embedding": [1], "path": str(workspace["target"] / "a.c")},
+        "bb": {"embedding": [2], "path": outside_path},
+    }
+    cache.update_cache(args, payload)
+
+    loaded = cache.get_embedded_files(args)
+
+    assert "aa" in loaded
+    assert "bb" not in loaded
+    assert len(loaded) == 1
+
+
+def test_get_embedded_files_multiple_targets_in_train_mode(workspace):
+    """In --train mode both positives and negatives are targets; files under
+    either directory should be kept, files elsewhere should be dropped."""
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        train=True,
+        include_non_c_files=True,
+        positives=workspace["positives"],
+        negatives=workspace["negatives"],
+    )
+    cache.init_cache(args)
+
+    outside_path = str(workspace["tmp_path"] / "unrelated" / "foo.c")
+
+    payload = {
+        "aa": {"embedding": [1], "path": str(workspace["positives"] / "pos1.c")},
+        "bb": {"embedding": [2], "path": str(workspace["negatives"] / "neg1.cpp")},
+        "cc": {"embedding": [3], "path": outside_path},
+    }
+    cache.update_cache(args, payload)
+
+    loaded = cache.get_embedded_files(args)
+
+    assert "aa" in loaded
+    assert "bb" in loaded
+    assert "cc" not in loaded
+    assert len(loaded) == 2
+
+
+def test_get_embedded_files_target_filter_and_exclusion_combined(workspace):
+    """Both the target-directory filter and exclusion patterns should apply.
+    A file must be under the target AND not excluded to be returned."""
+    exclude_file = workspace["tmp_path"] / ".exclude"
+    exclude_file.write_text("*.txt\n")
+
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        exclusion_list=exclude_file,
+    )
+    cache.init_cache(args)
+
+    outside_path = str(workspace["tmp_path"] / "elsewhere" / "x.c")
+
+    payload = {
+        "aa": {"embedding": [1], "path": str(workspace["target"] / "a.c")},
+        "bb": {"embedding": [2], "path": str(workspace["target"] / "notes.txt")},
+        "cc": {"embedding": [3], "path": outside_path},
+    }
+    cache.update_cache(args, payload)
+
+    loaded = cache.get_embedded_files(args)
+
+    assert "aa" in loaded       # under target, not excluded
+    assert "bb" not in loaded   # under target, but excluded by *.txt
+    assert "cc" not in loaded   # not under target
+    assert len(loaded) == 1
+
+
+def test_get_embedded_files_entries_without_path_are_kept(workspace):
+    """Cache entries that lack a 'path' key (e.g. legacy data) or are not
+    dicts should not crash and should be kept (benefit of the doubt)."""
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+    )
+    cache.init_cache(args)
+
+    payload = {
+        "aa": {"embedding": [1], "path": str(workspace["target"] / "a.c")},
+        "bb": {"embedding": [2]},   # no "path" key
+    }
+    cache.update_cache(args, payload)
+
+    loaded = cache.get_embedded_files(args)
+
+    assert "aa" in loaded
+    assert "bb" in loaded  # kept because we can't determine its location
+    assert len(loaded) == 2
 

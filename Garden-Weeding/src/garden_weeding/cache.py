@@ -51,23 +51,39 @@ def get_embedded_files(args):
     all_files = torch.load(embedded_files, weights_only=False)
 
     exclusion_patterns = load_exclusion_patterns(args)
-    if not exclusion_patterns:
-        return all_files
 
     targets = [args.target]
     if args.train:
         targets = [args.positives, args.negatives]
 
+    # Resolve target directories to absolute paths for reliable prefix checks.
+    resolved_targets = [os.path.realpath(t) for t in targets]
+
     filtered = {}
     for file_hash, entry in all_files.items():
         path = entry.get("path", "") if isinstance(entry, dict) else ""
-        excluded = False
-        for target in targets:
-            if is_excluded(path, target, exclusion_patterns):
-                excluded = True
-                break
-        if not excluded:
-            filtered[file_hash] = entry
+
+        # Skip entries that are not under any active target directory.
+        if path:
+            real_path = os.path.realpath(path)
+            in_target = any(
+                real_path == t or real_path.startswith(t + os.sep)
+                for t in resolved_targets
+            )
+            if not in_target:
+                continue
+
+        # Skip entries that match an exclusion pattern.
+        if exclusion_patterns and path:
+            excluded = False
+            for target in targets:
+                if is_excluded(path, target, exclusion_patterns):
+                    excluded = True
+                    break
+            if excluded:
+                continue
+
+        filtered[file_hash] = entry
     return filtered
 
 def update_cache(args, new_cache):
