@@ -298,24 +298,25 @@ def _print_report(crypto_files, non_crypto_files, threshold, args):
     print(f"  Non-crypto:   {len(non_crypto_files)}")
     print()
 
-    if crypto_files:
-        print("-" * 72)
-        print("  CRYPTOGRAPHIC FILES")
-        print("-" * 72)
-        for entry in sorted(crypto_files, key=lambda e: -max(e["probabilities"])):
-            max_prob = max(entry["probabilities"])
-            print(f"    [CRYPTO]  {entry['path']}")
-            print(f"              confidence: {max_prob:.4f}  chunks: {len(entry['probabilities'])}")
-        print()
-
     if non_crypto_files:
         print("-" * 72)
         print("  NON-CRYPTOGRAPHIC FILES")
         print("-" * 72)
-        for entry in sorted(non_crypto_files, key=lambda e: -max(e["probabilities"]) if e["probabilities"] else 0):
+        for entry in sorted(non_crypto_files, key=lambda e: max(e["probabilities"]) if e["probabilities"] else 0):
             max_prob = max(entry["probabilities"]) if entry["probabilities"] else 0.0
-            print(f"    [NON-CRYPTO]      {entry['path']}")
+            print(f"    [OK]      {entry['path']}")
             log.debug("              max_score: %.4f  chunks: %d", max_prob, len(entry["probabilities"]))
+        print()
+
+    if crypto_files:
+        print("-" * 72)
+        print("  CRYPTOGRAPHIC FILES")
+        print("-" * 72)
+        # Ascending confidence: lowest first, highest last.
+        for entry in sorted(crypto_files, key=lambda e: max(e["probabilities"])):
+            max_prob = max(entry["probabilities"])
+            print(f"    [CRYPTO]  {entry['path']}")
+            print(f"              confidence: {max_prob:.4f}  chunks: {len(entry['probabilities'])}")
         print()
 
     print("=" * 72)

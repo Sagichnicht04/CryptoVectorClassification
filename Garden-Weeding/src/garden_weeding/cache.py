@@ -4,6 +4,9 @@ import torch
 import json
 import hashlib
 import re
+import logging
+
+log = logging.getLogger("garden_weeding")
 
 def init_cache(args):
     cache_dir = Path(args.cache_dir)
@@ -105,6 +108,7 @@ def get_embedded_files(args):
 
         # Skip entries whose file exceeds the line limit.
         if path and exceeds_line_limit(path, file_size_limit):
+            log.warning("Skipping %s (exceeds %d line limit)", path, file_size_limit)
             continue
 
         filtered[file_hash] = entry
@@ -152,6 +156,7 @@ def load_uncached_hashes(args):
                 if is_excluded(path, target, exclusion_patterns):
                     continue
                 if exceeds_line_limit(path, file_size_limit):
+                    log.warning("Skipping %s (exceeds %d line limit)", path, file_size_limit)
                     continue
                 lang = get_lang_from_path(path)
                 if lang or args.include_non_c_files:
