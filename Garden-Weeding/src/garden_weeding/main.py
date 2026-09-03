@@ -116,7 +116,12 @@ def main():
     )
     files.add_argument(
         "--exclusion-list", default="./.exclude",
-        help="path to a file listing paths to exclude (default: %(default)s)",
+        help=(
+            "path to a file with exclusion patterns, one per line. "
+            "Supports gitignore-style globs (e.g. '*.txt', '**/vendor/*') "
+            "and Python regexes. Lines starting with '#' are comments "
+            "(default: %(default)s)"
+        ),
     )
     files.add_argument(
         "--target", default="./",

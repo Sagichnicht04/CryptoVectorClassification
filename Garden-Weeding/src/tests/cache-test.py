@@ -53,6 +53,7 @@ def _make_args(
     token_size: int = 4096,
     chunk_overlap_size: int = 512,
     embedding_model_name: str = "test-model",
+    exclusion_list: str | Path = "/nonexistent/.exclude",
 ):
     """Build a minimal argparse.Namespace matching what cache.py reads."""
     return argparse.Namespace(
@@ -68,6 +69,7 @@ def _make_args(
         token_size=token_size,
         chunk_overlap_size=chunk_overlap_size,
         embedding_model_name=embedding_model_name,
+        exclusion_list=str(exclusion_list),
     )
 
 
@@ -502,4 +504,425 @@ def test_load_uncached_hashes_auto_initialises_cache(workspace):
     assert _pickle_file(workspace["cache_dir"], args).is_file()
     assert len(result) > 0
 
+
+# --------------------------------------------------------------------------- #
+# _compile_pattern
+# --------------------------------------------------------------------------- #
+class TestCompilePattern:
+    """Unit tests for the glob-to-regex conversion helper.
+
+    _compile_pattern returns a (compiled_re, match_basename) tuple.
+    In these unit tests we extract the regex with [0] and test matching
+    directly.  The match_basename flag is tested via is_excluded().
+    """
+
+    def test_literal_filename(self):
+        pat, basename = cache._compile_pattern("notes.txt")
+        assert pat.search("notes.txt")
+        assert not pat.search("other.txt")
+        assert basename is True  # no '/' in pattern
+
+    def test_star_matches_filename(self):
+        pat, basename = cache._compile_pattern("*.txt")
+        assert pat.search("notes.txt")
+        assert pat.search("readme.txt")
+        assert not pat.search("notes.c")
+        assert basename is True
+
+    def test_star_does_not_cross_slash(self):
+        pat, _ = cache._compile_pattern("*.txt")
+        # '*' anchored: matches exact basename "notes.txt"
+        assert pat.search("notes.txt")
+        assert pat.search("readme.txt")
+        assert not pat.search("notes.c")
+        # '*' should not match a slash within the name
+        assert not pat.search("sub/notes.txt")
+
+    def test_basename_pattern_matched_via_is_excluded(self, tmp_path):
+        """Patterns without '/' match basenames, so they apply at any depth
+        when used through is_excluded (which extracts the basename)."""
+        patterns = [cache._compile_pattern("test_*")]
+        assert cache.is_excluded(
+            str(tmp_path / "test_foo"), str(tmp_path), patterns
+        )
+        # Matches nested file by basename too (gitignore convention).
+        assert cache.is_excluded(
+            str(tmp_path / "sub" / "test_foo"), str(tmp_path), patterns
+        )
+
+    def test_doublestar_slash_matches_any_depth(self):
+        pat, basename = cache._compile_pattern("**/test_*")
+        assert pat.search("test_foo.c")
+        assert pat.search("a/test_foo.c")
+        assert pat.search("a/b/c/test_foo.c")
+        assert basename is False  # pattern contains '/'
+
+    def test_doublestar_without_slash(self):
+        pat, basename = cache._compile_pattern("vendor/**")
+        assert pat.search("vendor/lib.c")
+        assert pat.search("vendor/sub/lib.c")
+        assert basename is False
+
+    def test_question_mark(self):
+        pat, _ = cache._compile_pattern("file?.c")
+        assert pat.search("file1.c")
+        assert pat.search("fileA.c")
+        assert not pat.search("file12.c")
+
+    def test_dot_is_literal(self):
+        pat, _ = cache._compile_pattern("*.c")
+        assert pat.search("foo.c")
+        # The dot shouldn't match arbitrary characters
+        assert not pat.search("fooXc")
+
+    def test_raw_regex_passthrough(self):
+        """Patterns with regex-specific metacharacters are used as-is."""
+        pat, basename = cache._compile_pattern(r"^vendor/.*\.c$")
+        assert pat.search("vendor/foo.c")
+        assert not pat.search("other/foo.c")
+        assert not pat.search("vendor/foo.txt")
+        assert basename is False  # raw regex always matches full path
+
+
+# --------------------------------------------------------------------------- #
+# load_exclusion_patterns
+# --------------------------------------------------------------------------- #
+class TestLoadExclusionPatterns:
+
+    def test_returns_empty_when_file_missing(self, tmp_path):
+        args = _make_args(
+            tmp_path / "cache", tmp_path / "target",
+            exclusion_list=tmp_path / "nonexistent_file",
+        )
+        assert cache.load_exclusion_patterns(args) == []
+
+    def test_loads_patterns_from_file(self, tmp_path):
+        exclude_file = tmp_path / ".exclude"
+        exclude_file.write_text("*.txt\nvendor/**\n")
+        args = _make_args(
+            tmp_path / "cache", tmp_path / "target",
+            exclusion_list=exclude_file,
+        )
+        patterns = cache.load_exclusion_patterns(args)
+        assert len(patterns) == 2
+
+    def test_ignores_comments_and_blank_lines(self, tmp_path):
+        exclude_file = tmp_path / ".exclude"
+        exclude_file.write_text("# this is a comment\n\n*.txt\n  \n# another\nvendor/**\n")
+        args = _make_args(
+            tmp_path / "cache", tmp_path / "target",
+            exclusion_list=exclude_file,
+        )
+        patterns = cache.load_exclusion_patterns(args)
+        assert len(patterns) == 2
+
+    def test_empty_file_returns_empty_list(self, tmp_path):
+        exclude_file = tmp_path / ".exclude"
+        exclude_file.write_text("")
+        args = _make_args(
+            tmp_path / "cache", tmp_path / "target",
+            exclusion_list=exclude_file,
+        )
+        assert cache.load_exclusion_patterns(args) == []
+
+
+# --------------------------------------------------------------------------- #
+# is_excluded
+# --------------------------------------------------------------------------- #
+class TestIsExcluded:
+
+    def test_no_patterns_never_excludes(self):
+        assert not cache.is_excluded("/some/path/foo.c", "/some/path", [])
+
+    def test_glob_star_matches_extension(self, tmp_path):
+        patterns = [cache._compile_pattern("*.txt")]
+        assert cache.is_excluded(
+            str(tmp_path / "notes.txt"), str(tmp_path), patterns
+        )
+        assert not cache.is_excluded(
+            str(tmp_path / "main.c"), str(tmp_path), patterns
+        )
+
+    def test_doublestar_matches_nested(self, tmp_path):
+        patterns = [cache._compile_pattern("**/secret_*")]
+        assert cache.is_excluded(
+            str(tmp_path / "a" / "b" / "secret_key.c"), str(tmp_path), patterns
+        )
+        assert cache.is_excluded(
+            str(tmp_path / "secret_key.c"), str(tmp_path), patterns
+        )
+        assert not cache.is_excluded(
+            str(tmp_path / "public_key.c"), str(tmp_path), patterns
+        )
+
+    def test_directory_glob(self, tmp_path):
+        patterns = [cache._compile_pattern("vendor/*")]
+        assert cache.is_excluded(
+            str(tmp_path / "vendor" / "lib.c"), str(tmp_path), patterns
+        )
+        assert not cache.is_excluded(
+            str(tmp_path / "src" / "lib.c"), str(tmp_path), patterns
+        )
+
+    def test_regex_pattern(self, tmp_path):
+        patterns = [cache._compile_pattern(r"^test[0-9]+\.c$")]
+        assert cache.is_excluded(
+            str(tmp_path / "test123.c"), str(tmp_path), patterns
+        )
+        assert not cache.is_excluded(
+            str(tmp_path / "test.c"), str(tmp_path), patterns
+        )
+
+    def test_multiple_patterns_any_match_excludes(self, tmp_path):
+        patterns = [
+            cache._compile_pattern("*.txt"),
+            cache._compile_pattern("**/vendor/*"),
+        ]
+        assert cache.is_excluded(
+            str(tmp_path / "readme.txt"), str(tmp_path), patterns
+        )
+        assert cache.is_excluded(
+            str(tmp_path / "a" / "vendor" / "lib.c"), str(tmp_path), patterns
+        )
+        assert not cache.is_excluded(
+            str(tmp_path / "src" / "main.c"), str(tmp_path), patterns
+        )
+
+
+# --------------------------------------------------------------------------- #
+# load_uncached_hashes with exclusion list integration
+# --------------------------------------------------------------------------- #
+def test_load_uncached_hashes_excludes_by_glob_pattern(workspace):
+    """Files matching an exclusion pattern should not appear in results."""
+    exclude_file = workspace["tmp_path"] / ".exclude"
+    exclude_file.write_text("*.c\n")
+
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        exclusion_list=exclude_file,
+    )
+    result = cache.load_uncached_hashes(args)
+
+    # a.c should be excluded; b.cpp, c.cc, d.cxx should remain
+    for path in result.values():
+        assert not path.endswith(".c"), f"{path} should have been excluded"
+    assert len(result) == 3  # b.cpp, c.cc, d.cxx
+
+
+def test_load_uncached_hashes_excludes_directory_glob(workspace):
+    """Patterns like 'sub/*' should exclude all files under that directory."""
+    exclude_file = workspace["tmp_path"] / ".exclude"
+    exclude_file.write_text("sub/*\n")
+
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        exclusion_list=exclude_file,
+    )
+    result = cache.load_uncached_hashes(args)
+
+    for path in result.values():
+        assert "/sub/" not in path and "\\sub\\" not in path
+    # a.c and b.cpp remain; c.cc and d.cxx (in sub/) are excluded
+    assert len(result) == 2
+
+
+def test_load_uncached_hashes_excludes_with_regex(workspace):
+    """Raw regex patterns should also work in the exclusion file."""
+    exclude_file = workspace["tmp_path"] / ".exclude"
+    # Exclude files whose names start with 'a' or 'b'
+    exclude_file.write_text(r"^[ab]\." + "\n")
+
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        exclusion_list=exclude_file,
+    )
+    result = cache.load_uncached_hashes(args)
+
+    filenames = {Path(p).name for p in result.values()}
+    assert "a.c" not in filenames
+    assert "b.cpp" not in filenames
+    # c.cc and d.cxx should remain
+    assert len(result) == 2
+
+
+def test_load_uncached_hashes_no_exclusion_file_excludes_nothing(workspace):
+    """When the exclusion list file doesn't exist, all files are included."""
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        exclusion_list=workspace["tmp_path"] / "does_not_exist",
+    )
+    result = cache.load_uncached_hashes(args)
+    assert set(result.values()) == _c_cpp_source_paths(workspace)
+
+
+def test_load_uncached_hashes_exclusion_with_comments_and_blanks(workspace):
+    """Comments and blank lines in the exclusion file must be ignored."""
+    exclude_file = workspace["tmp_path"] / ".exclude"
+    exclude_file.write_text("# Exclude text files\n\n*.c\n\n# done\n")
+
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        exclusion_list=exclude_file,
+    )
+    result = cache.load_uncached_hashes(args)
+
+    for path in result.values():
+        assert not path.endswith(".c")
+    assert len(result) == 3  # b.cpp, c.cc, d.cxx
+
+
+def test_load_uncached_hashes_exclusion_works_in_train_mode(workspace):
+    """Exclusion patterns should also apply in --train mode."""
+    exclude_file = workspace["tmp_path"] / ".exclude"
+    exclude_file.write_text("*.txt\n*.md\n")
+
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        train=True,
+        include_non_c_files=True,
+        positives=workspace["positives"],
+        negatives=workspace["negatives"],
+        exclusion_list=exclude_file,
+    )
+    result = cache.load_uncached_hashes(args)
+
+    # pos2.txt and neg2.md should be excluded; pos1.c and neg1.cpp remain
+    filenames = {Path(p).name for p in result.values()}
+    assert "pos2.txt" not in filenames
+    assert "neg2.md" not in filenames
+    assert "pos1.c" in filenames
+    assert "neg1.cpp" in filenames
+    assert len(result) == 2
+
+
+# --------------------------------------------------------------------------- #
+# get_embedded_files with exclusion list (cached files must also be filtered)
+# --------------------------------------------------------------------------- #
+def test_get_embedded_files_excludes_cached_entries_by_glob(workspace):
+    """Cached files whose path matches an exclusion pattern must not be
+    returned by get_embedded_files, even though they remain in the pickle."""
+    exclude_file = workspace["tmp_path"] / ".exclude"
+    exclude_file.write_text("*.txt\n")
+
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        exclusion_list=exclude_file,
+    )
+    cache.init_cache(args)
+
+    payload = {
+        "aa": {"embedding": [1, 2, 3], "path": str(workspace["target"] / "a.c")},
+        "bb": {"embedding": [4, 5, 6], "path": str(workspace["target"] / "notes.txt")},
+    }
+    cache.update_cache(args, payload)
+
+    loaded = cache.get_embedded_files(args)
+
+    # notes.txt should be excluded, a.c should remain.
+    assert "aa" in loaded
+    assert "bb" not in loaded
+    assert len(loaded) == 1
+
+
+def test_get_embedded_files_excludes_cached_entries_by_directory(workspace):
+    """Patterns like 'sub/*' must exclude cached files under that directory."""
+    exclude_file = workspace["tmp_path"] / ".exclude"
+    exclude_file.write_text("sub/*\n")
+
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        exclusion_list=exclude_file,
+    )
+    cache.init_cache(args)
+
+    payload = {
+        "aa": {"embedding": [1], "path": str(workspace["target"] / "a.c")},
+        "bb": {"embedding": [2], "path": str(workspace["target"] / "sub" / "c.cc")},
+        "cc": {"embedding": [3], "path": str(workspace["target"] / "sub" / "d.cxx")},
+    }
+    cache.update_cache(args, payload)
+
+    loaded = cache.get_embedded_files(args)
+
+    assert "aa" in loaded
+    assert "bb" not in loaded
+    assert "cc" not in loaded
+    assert len(loaded) == 1
+
+
+def test_get_embedded_files_no_exclusion_file_returns_all(workspace):
+    """When the exclusion file doesn't exist, all cached entries are returned."""
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        exclusion_list=workspace["tmp_path"] / "does_not_exist",
+    )
+    cache.init_cache(args)
+
+    payload = {
+        "aa": {"embedding": [1], "path": str(workspace["target"] / "a.c")},
+        "bb": {"embedding": [2], "path": str(workspace["target"] / "notes.txt")},
+    }
+    cache.update_cache(args, payload)
+
+    loaded = cache.get_embedded_files(args)
+    assert len(loaded) == 2
+    assert set(loaded.keys()) == {"aa", "bb"}
+
+
+def test_get_embedded_files_exclusion_applies_in_train_mode(workspace):
+    """In --train mode, cached files matching exclusion patterns must also be
+    filtered out based on the positives/negatives directories."""
+    exclude_file = workspace["tmp_path"] / ".exclude"
+    exclude_file.write_text("*.txt\n*.md\n")
+
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        train=True,
+        include_non_c_files=True,
+        positives=workspace["positives"],
+        negatives=workspace["negatives"],
+        exclusion_list=exclude_file,
+    )
+    cache.init_cache(args)
+
+    payload = {
+        "aa": {"embedding": [1], "path": str(workspace["positives"] / "pos1.c")},
+        "bb": {"embedding": [2], "path": str(workspace["positives"] / "pos2.txt")},
+        "cc": {"embedding": [3], "path": str(workspace["negatives"] / "neg1.cpp")},
+        "dd": {"embedding": [4], "path": str(workspace["negatives"] / "neg2.md")},
+    }
+    cache.update_cache(args, payload)
+
+    loaded = cache.get_embedded_files(args)
+
+    assert "aa" in loaded   # pos1.c  - not excluded
+    assert "bb" not in loaded  # pos2.txt - excluded
+    assert "cc" in loaded   # neg1.cpp - not excluded
+    assert "dd" not in loaded  # neg2.md  - excluded
+    assert len(loaded) == 2
+
+
+def test_get_embedded_files_empty_cache_with_exclusion(workspace):
+    """Empty cache returns empty dict even when exclusion patterns exist."""
+    exclude_file = workspace["tmp_path"] / ".exclude"
+    exclude_file.write_text("*.c\n")
+
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        exclusion_list=exclude_file,
+    )
+    cache.init_cache(args)
+
+    assert cache.get_embedded_files(args) == {}
 
