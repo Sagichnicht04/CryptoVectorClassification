@@ -54,7 +54,8 @@ def test_main_rejects_conflicting_gpu_cpu_flags(tmp_path):
     result = _run_main("--force-gpu", "--force-cpu", tmp_path=tmp_path)
 
     assert result.returncode == 1
-    assert "force gpu and cpu" in result.stdout.lower()
+    combined = (result.stdout + result.stderr).lower()
+    assert "force gpu and cpu" in combined
 
     # No cache dir should have been created (aborted before init_cache).
     assert not (tmp_path / "cache").exists()
@@ -67,7 +68,8 @@ def test_main_rejects_conflicting_threshold_flags(tmp_path):
     )
 
     assert result.returncode == 1
-    assert "strict and rough threshold" in result.stdout.lower()
+    combined = (result.stdout + result.stderr).lower()
+    assert "strict and rough threshold" in combined
     assert not (tmp_path / "cache").exists()
 
 

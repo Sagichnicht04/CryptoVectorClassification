@@ -1,7 +1,10 @@
 import os
 import json
 import pickle
+import logging
 import numpy as np
+
+log = logging.getLogger("garden_weeding")
 
 class RandomForestClassifier:
     """
@@ -57,8 +60,9 @@ class RandomForestClassifier:
         X = np.vstack(all_crypto_embs + all_non_crypto_embs).astype("float32")
         y = np.array([1] * len(all_crypto_embs) + [-1] * len(all_non_crypto_embs))
 
-        print(f"  Training Random Forest on {len(all_crypto_embs)} crypto chunks "
-              f"and {len(all_non_crypto_embs)} non-crypto chunks…")
+        log.debug("Training Random Forest on %d crypto chunks "
+                  "and %d non-crypto chunks...",
+                  len(all_crypto_embs), len(all_non_crypto_embs))
 
 
         self.model = _RFC(
@@ -72,4 +76,4 @@ class RandomForestClassifier:
 
         with open(self.path, "wb") as f:
             pickle.dump(self.model, f)
-        print(f"  Random Forest classifier saved to '{self.path}'")
+        log.debug("Random Forest classifier saved to '%s'", self.path)
