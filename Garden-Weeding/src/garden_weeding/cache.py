@@ -154,13 +154,13 @@ def load_uncached_hashes(args):
         for root, _, files in os.walk(target):
             for filename in files:
                 path = os.path.join(root, filename)
-                if is_excluded(path, target, exclusion_patterns):
-                    continue
-                if exceeds_file_size_limit(path, file_size_limit):
-                    log.warning("Skipping %s (exceeds %d character limit)", path, file_size_limit)
-                    continue
                 lang = get_lang_from_path(path)
                 if lang or args.include_non_c_files:
+                    if is_excluded(path, target, exclusion_patterns):
+                        continue
+                    if exceeds_file_size_limit(path, file_size_limit):
+                        log.warning("Skipping %s (exceeds %d character limit)", path, file_size_limit)
+                        continue
                     hash = get_md5_hash(path)
                     if hash not in embedded_files_hashes:
                         if not args.only_cache:
