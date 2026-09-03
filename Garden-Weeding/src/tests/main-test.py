@@ -85,6 +85,20 @@ def test_main_help_flag_exits_zero(tmp_path):
     assert "--target" in result.stdout
     assert "--train" in result.stdout
 
+    # The program description should be present.
+    assert "cryptographic" in result.stdout.lower()
+
+    # Argument groups should be present.
+    assert "cache control" in result.stdout.lower()
+    assert "hardware control" in result.stdout.lower()
+    assert "threshold control" in result.stdout.lower()
+    assert "training mode" in result.stdout.lower()
+    assert "file selection" in result.stdout.lower()
+    assert "embedding model configuration" in result.stdout.lower()
+
+    # Usage examples should appear in the epilog.
+    assert "examples:" in result.stdout.lower()
+
 
 def test_main_rejects_unknown_argument(tmp_path):
     """argparse must reject unknown flags with a non-zero exit code
