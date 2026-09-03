@@ -1,0 +1,208 @@
+/**
+ * NextKey C++ 客户端示例
+ * 
+ * 演示现代 C++ 风格的使用方式
+ */
+
+#include "NextKeyClient.hpp"
+#include <iostream>
+#include <thread>
+#include <chrono>
+
+using namespace std::chrono_literals;
+
+int main() {
+    // 配置信息（实际使用时请替换为真实值）
+    const std::string server_url = "http://localhost:8080";
+    const std::string project_uuid = "fe402b23-a193-47eb-9d7f-9c0a168e3cb3";
+    const std::string aes_key = "78e54210cc4bdf4e6955a5e916f7000631d583e8dccc7ffb93525f53fdcbf061";
+    const std::string card_key = "spFtLiotz8bTpYrr";
+    const std::string hwid = "test-device-cpp-001";
+    
+    std::cout << "=== NextKey C++ 客户端示例 ===\n\n";
+    
+    try {
+        // 1. 创建客户端 (RAII自动管理资源) - 使用默认AES-256-GCM加密方案
+        std::cout << "[步骤 1] 创建 NextKey 客户端（默认AES-256-GCM加密方案）...\n";
+        auto client = std::make_unique<nextkey::NextKeyClient>(server_url, project_uuid, aes_key);
+        std::cout << "✓ 客户端创建成功（加密方案: aes-256-gcm）\n\n";
+        
+        /*
+         * === 多加密方案支持 ===
+         * 
+         * NextKey SDK 支持多种加密方案：
+         * 
+         * 1. aes-256-gcm (推荐) - 安全的 AEAD 加密方案
+         *    密钥格式: 32字节密钥（64字符hex字符串）
+         *    示例: "78e54210cc4bdf4e6955a5e916f7000631d583e8dccc7ffb93525f53fdcbf061"
+         * 
+         * 2. chacha20-poly1305 (推荐) - 现代高性能AEAD加密算法，移动端友好
+         *    密钥格式: 32字节密钥（64字符hex字符串）
+         *    示例: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"
+         *    优势: 在移动设备和低功耗设备上性能更好
+         * 
+         * 3. rc4 (已弃用，不安全) - 传统流加密算法
+         *    密钥格式: hex编码的密钥字符串
+         *    示例: "632005a33ebb7619c1efd3853c7109f1c075c7bb86164e35da72916f9d4ef037"
+         *    警告: RC4已被证明不安全，仅用于兼容性需求
+         * 
+         * 4. xor (已弃用，极不安全) - 简单异或加密
+         *    密钥格式: hex编码的密钥字符串或任意字符串
+         *    示例: "a1b2c3d4e5f6"
+         *    警告: XOR加密极不安全，仅用于测试
+         * 
+         * 5. custom-base64 (不安全) - 自定义字符表的Base64编码
+         *    密钥格式: 64个不重复字符的映射表
+         *    示例: "zyxwvutsrqponmlkjihgfedcbaZYXWVUTSRQPONMLKJIHGFEDCBA9876543210+/"
+         *    警告: 仅用于简单混淆，不提供真正的加密保护
+         * 
+         * 使用其他加密方案的示例:
+         * 
+         * // ChaCha20-Poly1305 示例（推荐，移动端友好）
+         * auto client_chacha = std::make_unique<nextkey::NextKeyClient>(
+         *     server_url, project_uuid,
+         *     "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+         *     "chacha20-poly1305"
+         * );
+         * 
+         * // RC4 示例（已弃用）
+         * auto client_rc4 = std::make_unique<nextkey::NextKeyClient>(
+         *     server_url, project_uuid,
+         *     "632005a33ebb7619c1efd3853c7109f1",  // 更短的RC4密钥
+         *     "rc4"
+         * );
+         * 
+         * // XOR 示例（极不安全）
+         * auto client_xor = std::make_unique<nextkey::NextKeyClient>(
+         *     server_url, project_uuid,
+         *     "a1b2c3d4e5f6",  // 简单的XOR密钥
+         *     "xor"
+         * );
+         * 
+         * // 自定义Base64 示例（不安全）
+         * auto client_base64 = std::make_unique<nextkey::NextKeyClient>(
+         *     server_url, project_uuid,
+         *     "zyxwvutsrqponmlkjihgfedcbaZYXWVUTSRQPONMLKJIHGFEDCBA9876543210+/",
+         *     "custom-base64"
+         * );
+         * 
+         * 生产环境强烈建议使用 aes-256-gcm 或 chacha20-poly1305！
+         */
+        
+        // 2. 登录
+        std::cout << "[步骤 2] 登录中...\n";
+        auto login_result = client->login(card_key, hwid);
+        std::cout << "✓ 登录成功\n";
+        std::cout << "  令牌: " << login_result.token << "\n";
+        std::cout << "  Token 过期时间: " << login_result.expire_at << "\n";
+        std::cout << "  卡密信息:\n";
+        std::cout << "    ID: " << login_result.card.id << "\n";
+        std::cout << "    项目ID: " << login_result.card.project_id << "\n";
+        std::cout << "    卡密: " << login_result.card.card_key << "\n";
+        std::cout << "    已激活: " << (login_result.card.activated ? "是" : "否") << "\n";
+        if (!login_result.card.activated_at.empty()) {
+            std::cout << "    激活时间: " << login_result.card.activated_at << "\n";
+        }
+        std::cout << "    已冻结: " << (login_result.card.frozen ? "是" : "否") << "\n";
+        std::cout << "    时长: " << login_result.card.duration << " 秒\n";
+        if (!login_result.card.expire_at.empty()) {
+            std::cout << "    卡密到期时间: " << login_result.card.expire_at << "\n";
+        }
+        if (!login_result.card.card_type.empty()) {
+            std::cout << "    类型: " << login_result.card.card_type << "\n";
+        }
+        if (!login_result.card.note.empty()) {
+            std::cout << "    备注: " << login_result.card.note << "\n";
+        }
+        if (!login_result.card.custom_data.empty()) {
+            std::cout << "    专属信息: " << login_result.card.custom_data << "\n";
+        }
+        if (!login_result.card.hwid_list_json.empty()) {
+            std::cout << "    HWID 列表(JSON): " << login_result.card.hwid_list_json << "\n";
+        }
+        if (!login_result.card.ip_list_json.empty()) {
+            std::cout << "    IP 列表(JSON): " << login_result.card.ip_list_json << "\n";
+        }
+        std::cout << "    Max HWID: " << login_result.card.max_hwid << "\n";
+        std::cout << "    Max IP: " << login_result.card.max_ip << "\n";
+        std::cout << "    创建时间: " << login_result.card.created_at << "\n";
+        std::cout << "    更新时间: " << login_result.card.updated_at << "\n\n";
+        
+        // 3. 手动心跳测试
+        std::cout << "[步骤 3] 测试手动心跳...\n";
+        client->heartbeat();
+        std::cout << "✓ 心跳正常\n\n";
+        
+        // 4. 启动自动心跳（带错误回调）
+        std::cout << "[步骤 4] 启动自动心跳（5秒间隔）...\n";
+        client->startAutoHeartbeat(5s, [](const nextkey::NextKeyException& e) {
+            std::cerr << "[心跳错误] " << e.what() 
+                     << " (错误码: " << e.code() << ")\n";
+        });
+        std::cout << "✓ 自动心跳已启动\n\n";
+        
+        // 5. 获取云变量
+        std::cout << "[步骤 5] 获取云变量 'notice'...\n";
+        try {
+            auto value = client->getCloudVar("notice");
+            std::cout << "✓ 云变量值: " << value << "\n\n";
+        } catch (const nextkey::NextKeyException& e) {
+            std::cerr << "✗ " << e.what() << "\n\n";
+        }
+        
+        // 6. 更新专属信息
+        std::cout << "[步骤 6] 更新专属数据...\n";
+        std::string custom_data = "这是一个测试";
+        client->updateCustomData(custom_data);
+        std::cout << "✓ 专属数据已更新: " << custom_data << "\n\n";
+        
+        // 7. 获取项目信息
+        std::cout << "[步骤 7] 获取项目信息...\n";
+        auto proj_info = client->getProjectInfo();
+        std::cout << "✓ 项目信息:\n";
+        std::cout << "  UUID: " << proj_info.uuid << "\n";
+        std::cout << "  名称: " << proj_info.name << "\n";
+        std::cout << "  版本: " << proj_info.version << "\n";
+        std::cout << "  更新地址: " << proj_info.update_url << "\n\n";
+        
+        // 8. 解绑HWID示例
+        std::cout << "[步骤 8] 测试解绑HWID功能...\n";
+        std::cout << "提示：此操作需要项目启用解绑功能\n";
+        try {
+            client->unbindHWID(card_key, hwid);
+            std::cout << "✓ HWID解绑成功\n";
+            std::cout << "  注意：解绑后需要重新登录才能在此设备使用\n\n";
+        } catch (const nextkey::NextKeyException& e) {
+            std::cerr << "✗ 解绑失败: " << e.what() << "\n";
+            std::cerr << "  可能原因：项目未启用解绑、冷却期内、或HWID未绑定\n\n";
+        }
+        
+        // 9. 运行一段时间观察心跳
+        std::cout << "[步骤 9] 运行 10 秒以观察心跳...\n";
+        std::cout << "（自动心跳将在后台运行）\n\n";
+        
+        for (int i = 10; i > 0; --i) {
+            std::cout << "\r剩余时间: " << i << " 秒..." << std::flush;
+            std::this_thread::sleep_for(1s);
+        }
+        std::cout << "\n\n";
+        
+        // 10. 清理资源（RAII自动完成，心跳会立即停止不阻塞）
+        std::cout << "[步骤 10] 清理资源...\n";
+        client->stopAutoHeartbeat();
+        std::cout << "✓ 心跳已停止（detach模式，立即返回）\n";
+        std::cout << "✓ 资源将自动清理（RAII）\n\n";
+        
+        std::cout << "=== 示例成功完成 ===\n";
+        
+    } catch (const nextkey::NextKeyException& e) {
+        std::cerr << "\n[严重错误] " << e.what() 
+                  << " (错误码: " << e.code() << ")\n";
+        return 1;
+    } catch (const std::exception& e) {
+        std::cerr << "\n[异常] " << e.what() << "\n";
+        return 1;
+    }
+    
+    return 0;
+}

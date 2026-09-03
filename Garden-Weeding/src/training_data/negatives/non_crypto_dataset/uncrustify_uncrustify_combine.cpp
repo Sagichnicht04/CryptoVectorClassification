@@ -1,0 +1,6314 @@
+/**
+ * @file combine.cpp
+ * Labels the chunks as needed.
+ *
+ * @author  Ben Gardner
+ * @author  Guy Maurel
+ * @license GPL v2+
+ */
+
+#include "tokenizer/combine.h"
+
+#include "check_template.h"
+#include "ChunkStack.h"
+#include "lang_pawn.h"
+#include "log_rules.h"
+#include "newlines/iarf.h"
+#include "tokenizer/check_double_brace_init.h"
+#include "tokenizer/combine_fix_mark.h"
+#include "tokenizer/combine_skip.h"
+#include "tokenizer/combine_tools.h"
+#include "tokenizer/EnumStructUnionParser.h"
+#include "tokenizer/flag_braced_init_list.h"
+#include "tokenizer/flag_parens.h"
+#include "tokenizer/tokenize_cleanup.h"
+#include "uncrustify.h"
+
+#include <cstdio>                      // to get fprintf
+#include <limits>
+#include <map>
+#include <utility>
+#include <vector>
+
+
+constexpr static auto LCURRENT = LCOMBINE;
+
+
+using namespace std;
+using namespace uncrustify;
+
+
+/**
+ * Mark the parens and colons in:
+ *   asm volatile ( "xx" : "xx" (l), "yy"(h) : ...  );
+ *
+ * @param pc  the E_Token::CT_ASM item
+ */
+static void flag_asm(Chunk const *pc);
+
+
+static void process_returns_and_throws();
+
+
+/**
+ * Processes a 'return' or 'throw' statement, labeling the parens and marking
+ * the parent. May remove or add parens around the return/throw statement.
+ *
+ * @param pc  Pointer to the return or throw chunk
+ */
+static Chunk *process_return_or_throw(Chunk *pc);
+
+
+/**
+ * Process an ObjC 'class'
+ * pc is the chunk after '@implementation' or '@interface' or '@protocol'.
+ * Change colons, etc. Processes stuff until '@end'.
+ * Skips anything in braces.
+ */
+static void handle_oc_class(Chunk *pc);
+
+
+/**
+ *  Mark Objective-C blocks (aka lambdas or closures)
+ *  The syntax and usage is exactly like C function pointers
+ *  but instead of an asterisk they have a caret as pointer symbol.
+ *  Although it may look expensive this functions is only triggered
+ *  on appearance of an OC_BLOCK_CARET for lang_flag_e::LANG_OC.
+ *  repeat(10, ^{ putc('0'+d); });
+ *  typedef void (^workBlk_t)(void);
+ *
+ * @param pc  points to the '^'
+ */
+static void handle_oc_block_literal(Chunk *pc);
+
+
+/**
+ * Mark Objective-C block types.
+ * The syntax and usage is exactly like C function pointers
+ * but instead of an asterisk they have a caret as pointer symbol.
+ *  typedef void (^workBlk_t)(void);
+ *  const char * (^workVar)(void);
+ *  -(void)Foo:(void(^)())blk { }
+ *
+ * This is triggered when the sequence '(' '^' is found.
+ *
+ * @param pc  points to the '^'
+ */
+static void handle_oc_block_type(Chunk *pc);
+
+
+/**
+ * Process an ObjC message spec/dec
+ *
+ * Specs:
+ * -(void) foo ARGS;
+ *
+ * Declaration:
+ * -(void) foo ARGS {  }
+ *
+ * LABEL : (ARGTYPE) ARGNAME
+ *
+ * ARGS is ': (ARGTYPE) ARGNAME [MOREARGS...]'
+ * MOREARGS is ' [ LABEL] : (ARGTYPE) ARGNAME '
+ * -(void) foo: (int) arg: {  }
+ * -(void) foo: (int) arg: {  }
+ * -(void) insertObject:(id)anObject atIndex:(int)index
+ */
+static void handle_oc_message_decl(Chunk *pc);
+
+
+/**
+ * Process an ObjC message send statement:
+ * [ class func: val1 name2: val2 name3: val3] ; // named params
+ * [ class func: val1      : val2      : val3] ; // unnamed params
+ * [ class <proto> self method ] ; // with protocol
+ * [[NSMutableString alloc] initWithString: @"" ] // class from msg
+ * [func(a,b,c) lastObject ] // class from func
+ *
+ * Mainly find the matching ']' and ';' and mark the colons.
+ *
+ * @param pc  points to the open square '['
+ */
+static void handle_oc_message_send(Chunk *pc);
+
+
+//! Process @Property values and re-arrange them if necessary
+static void handle_oc_property_decl(Chunk const *pc);
+
+//! Process @available annotation
+static void handle_oc_available(Chunk *pc);
+
+/**
+ * Process a type that is enclosed in parens in message declarations.
+ * TODO: handle block types, which get special formatting
+ *
+ * @param pc  points to the open paren
+ *
+ * @return the chunk after the type
+ */
+static Chunk *handle_oc_md_type(Chunk *paren_open, E_Token ptype, PcfFlags flags, bool &did_it);
+
+/**
+ * Process an C# [] thingy:
+ *    [assembly: xxx]
+ *    [AttributeUsage()]
+ *    [@X]
+ *
+ * Set the next chunk to a statement start after the close ']'
+ *
+ * @param pc  points to the open square '['
+ */
+static void handle_cs_square_stmt(Chunk *pc);
+
+
+/**
+ * We are on a brace open that is preceded by a word or square close.
+ * Set the brace parent to E_Token::CT_CS_PROPERTY and find the first item in the
+ * property and set its parent, too.
+ */
+static void handle_cs_property(Chunk *pc);
+
+
+/**
+ * We hit a ']' followed by a WORD. This may be a multidimensional array type.
+ * Example: int[,,] x;
+ * If there is nothing but commas between the open and close, then mark it.
+ */
+static void handle_cs_array_type(Chunk *pc);
+
+
+/**
+ * We are on the C++ 'template' keyword.
+ * What follows should be the following:
+ *
+ * template <class identifier> function_declaration;
+ * template <typename identifier> function_declaration;
+ * template <class identifier> class class_declaration;
+ * template <typename identifier> class class_declaration;
+ *
+ * Change the 'class' inside the <> to E_Token::CT_TYPE.
+ * Set the parent to the class after the <> to E_Token::CT_TEMPLATE.
+ * Set the parent of the semicolon to E_Token::CT_TEMPLATE.
+ */
+static void handle_cpp_template(Chunk const *pc);
+
+
+/**
+ * Verify and then mark C++ lambda expressions.
+ * The expected format is '[...](...){...}' or '[...](...) -> type {...}'
+ * sq_o is '[' E_Token::CT_SQUARE_OPEN or '[]' E_Token::CT_TSQUARE
+ * Split the '[]' so we can control the space
+ */
+static void handle_cpp_lambda(Chunk *pc);
+
+
+/**
+ * We are on the D 'template' keyword.
+ * What follows should be the following:
+ *
+ * template NAME ( TYPELIST ) { BODY }
+ *
+ * Set the parent of NAME to template, change NAME to E_Token::CT_TYPE.
+ * Set the parent of the parens and braces to E_Token::CT_TEMPLATE.
+ * Scan the body for each type in TYPELIST and change the type to E_Token::CT_TYPE.
+ */
+static void handle_d_template(Chunk const *pc);
+
+
+/**
+ * A func wrap chunk and what follows should be treated as a function name.
+ * Create new text for the chunk and call it a E_Token::CT_FUNCTION.
+ *
+ * A type wrap chunk and what follows should be treated as a simple type.
+ * Create new text for the chunk and call it a E_Token::CT_TYPE.
+ */
+static void handle_wrap(Chunk *pc);
+
+
+/**
+ * A proto wrap chunk and what follows should be treated as a function proto.
+ *
+ * RETTYPE PROTO_WRAP( NAME, PARAMS ); or RETTYPE PROTO_WRAP( NAME, (PARAMS) );
+ * RETTYPE gets changed with make_type().
+ * PROTO_WRAP is marked as E_Token::CT_FUNC_PROTO or E_Token::CT_FUNC_DEF.
+ * NAME is marked as E_Token::CT_WORD.
+ * PARAMS is all marked as prototype parameters.
+ */
+static void handle_proto_wrap(Chunk *pc);
+
+
+static bool is_oc_block(Chunk const *pc);
+
+
+/**
+ * Java assert statements are: "assert EXP1 [: EXP2] ;"
+ * Mark the parent of the colon and semicolon
+ */
+static void handle_java_assert(Chunk *pc);
+
+
+/**
+ * Check if a '&' or '&&' token is in a function reference qualifier context.
+ * This detects patterns like:
+ *   void foo() &
+ *   void foo() &&
+ *   void foo() const &
+ *   void foo() const &&
+ *   auto foo() && -> int
+ *
+ * @param pc Pointer to the '&' or '&&' chunk
+ * @return true if this is a function reference qualifier
+ */
+static bool is_function_ref_qualifier_context(Chunk const *pc);
+
+
+/**
+ * Handles && as rvalue reference after template close angle.
+ * Pattern: std::vector<int>&& or template<T> ... >&&
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_angle_close(Chunk const *prev, Chunk *pc);
+
+
+/**
+ * Handles && as rvalue reference before ellipsis (variadic template).
+ * Pattern: Args&&... args
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_variadic(Chunk const *prev, Chunk *pc, Chunk const *next);
+
+
+/**
+ * Handles && in C++17 fold expressions.
+ * In fold expressions && is always a logical operator (E_Token::CT_BOOL) not a rvalue reference.
+ *
+ * Patterns:
+ *   (... && args)       - unary left fold: ellipsis before &&
+ *   (args && ...)       - unary right fold: && before ellipsis
+ *   (true && ... && args) - binary fold: value && ... && pack
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled (kept as BOOL), false otherwise
+ */
+static bool handle_fold_expression(Chunk const *prev, Chunk const *pc, Chunk const *next);
+
+
+/**
+ * Handles && in template type contexts.
+ * Pattern: std::function<void(int&&)>, std::tuple<T&&, U&&>
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_in_template(Chunk const *prev, Chunk *pc, Chunk const *next);
+
+
+/**
+ * Handles && in function declarations with user-defined types.
+ *   Pattern 1 (in-class):     TypeName&& funcName(...);
+ *   Pattern 2 (out-of-class): TypeName&& ClassName::funcName(...)
+ *                             ns::Type&& ns::Class::funcName(...)
+ *                             T&& Container<T>::get(...)
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_function_decl(Chunk const *prev, Chunk *pc, Chunk *next);
+
+
+/**
+ * Handles && in operator overload declarations with user-defined types.
+ * Pattern: TypeName&& operator=(...) - return type rvalue reference
+ * Pattern: operator=(TypeName&&) - parameter type rvalue reference
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_operator_decl(Chunk const *prev, Chunk *pc, Chunk *next);
+
+
+/**
+ * Handles && after decltype(...) in function return context.
+ * Pattern: decltype(...)&& funcName(...);
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_decltype(Chunk const *prev, Chunk *pc, Chunk const *next);
+
+
+/**
+ * Handles && after namespace-qualified types.
+ * Pattern: ns1::ns2::Type&& funcName(...);
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_namespace_qualified(Chunk const *prev, Chunk *pc, Chunk const *next);
+
+
+/**
+ * Handles && as forwarding reference in function parameters.
+ * Pattern: template<typename T> void func(T&& t);
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_forwarding_ref(Chunk const *prev, Chunk *pc, Chunk const *next);
+
+
+/**
+ * Handles && after a type, with assign before semicolon.
+ * Pattern: inline T && someFunc(foo * *p, bar && q) { }
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_after_type(Chunk *prev, Chunk *pc);
+
+
+/**
+ * Handles && in trailing return type context.
+ * Pattern: auto func() -> int&&; or auto func() -> SomeType&&
+ * Pattern: [...](...) -> Type&& { }
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_trailing_return(Chunk *prev, Chunk *pc, Chunk const *next);
+
+
+/**
+ * Handles && in statement parentheses (for, if, switch).
+ *
+ * For range-based for loops:
+ *   Pattern: for (Type&& var : range) - && is BYREF (rvalue/forwarding reference)
+ *
+ * For C++17 init-if/init-switch statements:
+ *   if (init; condition) or switch (init; condition)
+ *   The && in the condition part (after semicolon) should be E_Token::CT_BOOL (logical and).
+ *   The && in the init part (before semicolon) may be E_Token::CT_BYREF (rvalue reference).
+ *
+ * Pattern: if(auto foo = 42; a&&b)     - && is BOOL (in condition)
+ * Pattern: if(int&&x = getValue(); x)  - && is BYREF (in init, rvalue ref)
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled (classification decided), false otherwise
+ */
+static bool handle_rvalue_in_sparen(Chunk const *prev, Chunk *pc, Chunk const *next);
+
+
+/**
+ * Handles && in using alias declarations.
+ * Pattern: using Name = Type&&;
+ *
+ * In using alias declarations, the && after the type and before the semicolon
+ * is an rvalue reference type, not a logical AND.
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_using_alias(Chunk *prev, Chunk *pc, Chunk const *next);
+
+/**
+ * Handles && inside decltype(...) or noexcept(...) parentheses.
+ * Inside decltype(...) or noexcept(...), the && is always a boolean operator
+ * since these take expressions, not types.
+ *
+ * Pattern: decltype(a && b) or noexcept(a && b) - && should be BOOL
+ *
+ * Note: decltype(...)&& (after decltype) is handled by handle_rvalue_decltype
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_bool_inside_expression_context(Chunk const *prev, Chunk *pc, Chunk *next);
+
+
+/**
+ * Handles && in ternary conditional expressions.
+ * When && is part of a ternary condition like (a && b) ? x : y it should
+ * remain as E_Token::CT_BOOL not be converted to E_Token::CT_BYREF.
+ *
+ * Pattern: (expr1 && expr2) ? ... - && should be BOOL
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled (kept as BOOL), false otherwise
+ */
+static bool handle_ternary_bool_context(Chunk *prev, Chunk const *pc, Chunk *next);
+
+
+/**
+ * Handles && in conversion operator return types.
+ * Pattern: operator int&&() - && should be BYREF
+ * Pattern: operator std::string&&() - && should be BYREF
+ * Pattern: operator T&&() - && should be BYREF (template conversion)
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_conversion_operator(Chunk *prev, Chunk *pc, Chunk const *next);
+
+
+/**
+ * Handles && in function pointer or member function pointer type declarations.
+ * Pattern: int&& (*func_ptr)(int&&, T&&);
+ * Pattern: using MFP = Type&& (Class::*)(Args&&);
+ *
+ * In these contexts, && appearing after a type and before ) or comma within
+ * the function pointer parameter list is an rvalue reference not logical AND.
+ *
+ * @param prev  The chunk before pc
+ * @param pc    The && chunk
+ * @param next  The chunk after pc
+ * @return      true if handled, false otherwise
+ */
+static bool handle_rvalue_func_ptr_params(Chunk const *prev, Chunk *pc, Chunk const *next);
+
+
+static void flag_asm(Chunk const *pc)
+{
+   LOG_FUNC_ENTRY();
+
+   Chunk *tmp = pc->GetNextNcNnl(E_Scope::PREPROC);
+
+   if (tmp->IsNot(E_Token::CT_QUALIFIER))
+   {
+      return;
+   }
+   Chunk *po = tmp->GetNextNcNnl(E_Scope::PREPROC);
+
+   if (!po->IsParenOpen())
+   {
+      return;
+   }
+   Chunk *end = po->GetClosingParen(E_Scope::PREPROC);
+
+   if (end->IsNullChunk())
+   {
+      return;
+   }
+   po->SetParentType(E_Token::CT_ASM);
+   end->SetParentType(E_Token::CT_ASM);
+
+   for (  tmp = po->GetNextNcNnl(E_Scope::PREPROC);
+          tmp->IsNotNullChunk()
+       && tmp != end;
+          tmp = tmp->GetNextNcNnl(E_Scope::PREPROC))
+   {
+      if (tmp->Is(E_Token::CT_COLON))
+      {
+         tmp->SetType(E_Token::CT_ASM_COLON);
+      }
+      else if (tmp->Is(E_Token::CT_DC_MEMBER))
+      {
+         // if there is a string on both sides, then this is two ASM_COLONs
+         if (  tmp->GetNextNcNnl(E_Scope::PREPROC)->Is(E_Token::CT_STRING)
+            && tmp->GetPrevNcNnlNi(E_Scope::PREPROC)->Is(E_Token::CT_STRING)) // Issue #2279
+         {
+            Chunk nc;
+
+            nc = *tmp;
+
+            tmp->Text().resize(1);
+            tmp->SetOrigColEnd(tmp->GetOrigCol() + 1);
+            tmp->SetType(E_Token::CT_ASM_COLON);
+
+            nc.SetType(tmp->GetType());
+            nc.Text().pop_front();
+            nc.SetOrigCol(nc.GetOrigCol() + 1);
+            nc.SetColumn(nc.GetColumn() + 1);
+            nc.CopyAndAddAfter(tmp);
+         }
+      }
+   }
+
+   tmp = end->GetNextNcNnl(E_Scope::PREPROC);
+
+   if (tmp->IsNullChunk())
+   {
+      return;
+   }
+
+   if (tmp->Is(E_Token::CT_SEMICOLON))
+   {
+      tmp->SetParentType(E_Token::CT_ASM);
+   }
+} // flag_asm
+
+
+static bool handle_rvalue_angle_close(Chunk const *prev, Chunk *pc)
+{
+   if (prev->Is(E_Token::CT_ANGLE_CLOSE))
+   {
+      Chunk const *next = pc->GetNextNcNnl();
+
+      // If next is a unary operator (!, ~) this is a logical AND expression
+      // Pattern: static_assert(std::is_class_v<T> && !std::is_same_v<T>)
+      if (  next->Is(E_Token::CT_NOT)       // !
+         || next->Is(E_Token::CT_INV))      // ~
+      {
+         LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && after > followed by unary op, keeping as BOOL\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+         return(true);
+      }
+
+      if (pc->TestFlags(PCF_IN_TEMPLATE))
+      {
+         // If next is ANGLE_CLOSE this is an rvalue reference type in a nested template
+         // Pattern: std::vector<std::pair<int&&>&&>&& - the && before outer > is BYREF
+         if (next->Is(E_Token::CT_ANGLE_CLOSE))
+         {
+            pc->SetType(E_Token::CT_BYREF);
+            return(true);
+         }
+
+         // If next is a word/type that could be the start of another template expression
+         // (like std::is_move_constructible_v) this is likely a boolean AND
+         // Pattern: bool_constant<is_class_v<T> && is_constructible_v<T>>
+         if (  next->Is(E_Token::CT_WORD)
+            || next->Is(E_Token::CT_TYPE)
+            || next->Is(E_Token::CT_DC_MEMBER)   // ::namespace
+            || next->Is(E_Token::CT_DECLTYPE)
+            || next->Is(E_Token::CT_SIZEOF))
+         {
+            LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && after > inside template, keeping as BOOL\n",
+                    __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+            return(true);
+         }
+      }
+
+      // Don't convert && to BYREF if we're inside statement parentheses (if, while, for, etc.)
+      // and not in a clear template type context
+      if (pc->TestFlags(PCF_IN_SPAREN))
+      {
+         return(false);
+      }
+
+      // If we're inside parentheses and next is a word/type that could be
+      // another expression term, this is likely a boolean expression like:
+      // static_assert(std::is_integral_v<T> && std::is_signed_v<T>)
+      // But inside class braces it's likely a function return type: std::vector<int>&& func()
+      // Check level > brace_level to ensure we're inside parens, not just inside class/namespace
+      if (  pc->GetLevel() > pc->GetBraceLevel()
+         && (  next->Is(E_Token::CT_WORD)
+            || next->Is(E_Token::CT_TYPE)
+            || next->Is(E_Token::CT_DC_MEMBER)))   // ::namespace
+      {
+         LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && after > inside parens followed by expression term, keeping as BOOL\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+         return(true);  // Keep as BOOL
+      }
+      // Check if there's an assignment before this && to detect
+      // expression context like: bool val = std::is_class<T> && y; or
+      // bool val = std::is_class<T> && y();
+      // Scan backward to find E_Token::CT_ASSIGN before statement boundary
+      // But skip:
+      // - USING_ALIAS assignments which define types, not expressions
+      // - Template default parameter assignments (T = int, T = U, etc.)
+      Chunk const *tmp = pc->GetPrevNcNnlNi();
+
+      while (tmp->IsNotNullChunk())
+      {
+         if (  tmp->Is(E_Token::CT_ASSIGN)
+            && tmp->GetParentType() != E_Token::CT_USING_ALIAS
+            && !tmp->TestFlags(PCF_IN_TEMPLATE))
+         {
+            LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && after > with preceding assignment, keeping as BOOL\n",
+                    __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+            return(true);  // This is an expression context, keep as BOOL
+         }
+
+         // Stop at statement boundaries
+         if (  tmp->Is(E_Token::CT_SEMICOLON)
+            || tmp->Is(E_Token::CT_BRACE_OPEN)
+            || tmp->Is(E_Token::CT_BRACE_CLOSE))
+         {
+            break;
+         }
+         tmp = tmp->GetPrevNcNnlNi();
+      }
+      pc->SetType(E_Token::CT_BYREF);
+      return(true);
+   }
+   return(false);
+} // handle_rvalue_angle_close
+
+
+static bool handle_rvalue_variadic(Chunk const *prev, Chunk *pc, Chunk const *next)
+{
+   // Handle && as rvalue reference before ellipsis (variadic template parameter pack)
+   // e.g. void func(Args&&... args);
+   // But not for fold expressions like (args && ...) where args is a WORD, not a TYPE
+   if (  next->Is(E_Token::CT_ELLIPSIS)
+      && (  prev->Is(E_Token::CT_TYPE)
+         || prev->Is(E_Token::CT_PARAMETER_PACK)))  // Only convert if prev is a TYPE or PARAMETER_PACK, not a WORD
+   {
+      pc->SetType(E_Token::CT_BYREF);
+      return(true);
+   }
+   return(false);
+}
+
+
+static bool handle_fold_expression(Chunk const *prev, Chunk const *pc, Chunk const *next)
+{
+   // Handle && in C++17 fold expressions - keep as E_Token::CT_BOOL (logical operator)
+   //
+   // Fold expression patterns:
+   //   (... && args)         - unary left fold: ellipsis before &&
+   //   (args && ...)         - unary right fold: && before ellipsis
+   //   (true && ... && args) - binary fold: first && is followed by ..., second && is preceded by ...
+   //
+   // In all these cases && is a logical AND operator, not a rvalue reference.
+
+   // Check for right fold pattern: (args && ...)
+   // The && is followed by E_Token::CT_ELLIPSIS and ellipsis is followed by closing paren
+   if (next->Is(E_Token::CT_ELLIPSIS))
+   {
+      // Check what comes after the ellipsis
+      // In fold expression: (args && ...) - next after ellipsis is ) or &&
+      // In variadic param:  Args&&... args - next after ellipsis is the param name (WORD)
+      Chunk const *after_ellipsis = next->GetNextNcNnl();
+
+      if (  after_ellipsis->IsNotNullChunk()
+         && (  after_ellipsis->Is(E_Token::CT_PAREN_CLOSE)
+            || after_ellipsis->Is(E_Token::CT_FPAREN_CLOSE)
+            || after_ellipsis->Is(E_Token::CT_BOOL)
+            || after_ellipsis->Is(E_Token::CT_SEMICOLON)))
+      {
+         LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && before ellipsis in fold expression, keeping as BOOL\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+         return(true);
+      }
+      // Otherwise, this is variadic template: Args&&... args
+      // Let other handlers convert && to BYREF
+      return(false);
+   }
+
+   // Check for left fold pattern: (... && args)
+   // The && is preceded by E_Token::CT_ELLIPSIS
+   if (prev->Is(E_Token::CT_ELLIPSIS))
+   {
+      LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && after ellipsis in fold expression, keeping as BOOL\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+      // Token is already E_Token::CT_BOOL, return true to prevent other handlers from converting to BYREF
+      return(true);
+   }
+   return(false);
+} // handle_fold_expression
+
+
+static bool handle_rvalue_in_template(Chunk const *prev, Chunk *pc, Chunk const *next)
+{
+   if (!pc->TestFlags(PCF_IN_TEMPLATE))
+   {
+      return(false);
+   }
+
+   // Accept TYPE, WORD (user-defined types) or PARAMETER_PACK (template parameters like T)
+   if (  !prev->Is(E_Token::CT_TYPE)
+      && !prev->Is(E_Token::CT_WORD)
+      && !prev->Is(E_Token::CT_PARAMETER_PACK))
+   {
+      return(false);
+   }
+
+   // Handle && inside template function signatures: std::function<void(int&&)>
+   // When prev is a TYPE and next is PAREN_CLOSE, this is a type context, not logical AND
+   if (next->Is(E_Token::CT_PAREN_CLOSE))
+   {
+      pc->SetType(E_Token::CT_BYREF);
+      return(true);
+   }
+
+   // Handle && as first template argument rvalue reference
+   // e.g., std::tuple<T&&, U&&> - both T&& should be BYREF
+   // Pattern: TYPE&& after ANGLE_OPEN (possibly with ANGLE_OPEN directly before TYPE)
+   if (  next->Is(E_Token::CT_COMMA)
+      || next->Is(E_Token::CT_ANGLE_CLOSE))
+   {
+      // Check if we're in a type context by looking at what's before the TYPE
+      Chunk const *before_type = prev->GetPrevNcNnlNi();
+
+      // Walk back through namespace-qualified types (std::string, ns::Type, etc)
+      // Pattern: ns1::ns2::Type - we need to find what's before ns1
+      while (  before_type->Is(E_Token::CT_DC_MEMBER)
+            || before_type->Is(E_Token::CT_TYPE)
+            || before_type->Is(E_Token::CT_WORD))
+      {
+         Chunk *tmp = before_type->GetPrevNcNnlNi();
+
+         if (tmp->IsNullChunk())
+         {
+            break;
+         }
+         before_type = tmp;
+      }
+
+      if (  before_type->Is(E_Token::CT_ANGLE_OPEN)
+         || before_type->Is(E_Token::CT_COMMA)
+         || before_type->Is(E_Token::CT_PAREN_OPEN))
+      {
+         pc->SetType(E_Token::CT_BYREF);
+         return(true);
+      }
+   }
+
+   // Handle && in function return type inside template (e.g, std::function<T&&()>)
+   // Pattern: TYPE&& followed by PAREN_OPEN (the () for the function signature)
+   if (next->Is(E_Token::CT_PAREN_OPEN))
+   {
+      pc->SetType(E_Token::CT_BYREF);
+      return(true);
+   }
+
+   // Handle && as logical AND inside template arguments
+   // Pattern: std::conditional_t<A && B, T&&, U&&>
+   // When next is WORD/TYPE this is likely a boolean expression not rvalue ref
+   if (  next->Is(E_Token::CT_WORD)
+      || next->Is(E_Token::CT_TYPE))
+   {
+      // This is logical AND inside template arguments (e.g, A && B)
+      // Leave as E_Token::CT_BOOL and return true to prevent other handlers from converting to BYREF
+      LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && followed by WORD/TYPE inside template, keeping as BOOL\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+      return(true);
+   }
+   return(false);
+} // handle_rvalue_in_template
+
+
+static bool handle_rvalue_function_decl(Chunk const *prev, Chunk *pc, Chunk *next)
+{
+   // Handle && as rvalue reference in function declarations with user-defined types
+   //
+   // Pattern 1 (in-class): TypeName&& funcName(...);
+   //   prev is E_Token::CT_WORD (TypeName), next is E_Token::CT_WORD (funcName) followed by (
+   //
+   // Pattern 2 (out-of-class): TypeName&& ClassName::funcName(...)
+   //   prev is E_Token::CT_WORD/TYPE (TypeName), next starts a qualified name leading to funcName(
+   //   e.g, ns::Type&& ns::Class::funcName(...)
+   //   e.g, T&& Container<T>::get(...)
+
+   // prev must be a type name
+   if (  !prev->Is(E_Token::CT_WORD)
+      && !prev->Is(E_Token::CT_TYPE)
+      && !prev->Is(E_Token::CT_PARAMETER_PACK))
+   {
+      return(false);
+   }
+
+   // next must be E_Token::CT_WORD or E_Token::CT_TYPE (potential function name or start of qualification)
+   if (  !next->Is(E_Token::CT_WORD)
+      && !next->Is(E_Token::CT_TYPE))
+   {
+      return(false);
+   }
+   // Try to find the function name - either directly or through qualified name
+   Chunk const *func_name  = Chunk::NullChunkPtr;
+   Chunk       *after_next = next->GetNextNcNnl();
+
+   // Pattern 1: next is directly the function name followed by (
+   if (  after_next->Is(E_Token::CT_PAREN_OPEN)
+      || after_next->Is(E_Token::CT_FPAREN_OPEN))
+   {
+      func_name = next;
+   }
+   else
+   {
+      // Pattern 2: next starts a qualified name ClassName:: or ns::ClassName::
+      // Handle template class name: Container<T>::get()
+      Chunk *tmp = after_next;
+
+      if (tmp->Is(E_Token::CT_ANGLE_OPEN))
+      {
+         tmp = tmp->GetClosingParen();
+
+         if (tmp->IsNullChunk())
+         {
+            return(false);
+         }
+         tmp = tmp->GetNextNcNnl();
+      }
+
+      if (tmp->IsNot(E_Token::CT_DC_MEMBER))
+      {
+         return(false);
+      }
+
+      // Walk through the qualification chain: ClassName:: or ns::ClassName::
+      // Looking for pattern: (TYPE/WORD ::)+ WORD/FUNC_CALL/FUNC_DEF (
+      while (  tmp->IsNotNullChunk()
+            && tmp->Is(E_Token::CT_DC_MEMBER))
+      {
+         tmp = tmp->GetNextNcNnl();  // Skip ::
+
+         if (tmp->IsNullChunk())
+         {
+            break;
+         }
+
+         // Handle template class: Container<T>
+         if (tmp->Is(E_Token::CT_ANGLE_OPEN))
+         {
+            // Skip to matching angle close
+            tmp = tmp->GetClosingParen();
+
+            if (tmp->IsNullChunk())
+            {
+               return(false);
+            }
+            tmp = tmp->GetNextNcNnl();
+
+            // After template args, should be ::
+            if (tmp->Is(E_Token::CT_DC_MEMBER))
+            {
+               continue;
+            }
+            // Not a pattern we recognize
+            return(false);
+         }
+         // Check if this is the function name (followed by paren)
+         Chunk *after_name = tmp->GetNextNcNnl();
+
+         if (  after_name->Is(E_Token::CT_PAREN_OPEN)
+            || after_name->Is(E_Token::CT_FPAREN_OPEN))
+         {
+            // Found the function name
+            func_name = tmp;
+            break;
+         }
+
+         // Check if it's an intermediate namespace/class name (followed by ::)
+         if (after_name->Is(E_Token::CT_DC_MEMBER))
+         {
+            tmp = after_name;
+            continue;
+         }
+
+         // Check for template class member: Container<T>::get
+         if (after_name->Is(E_Token::CT_ANGLE_OPEN))
+         {
+            Chunk const *angle_close = after_name->GetClosingParen();
+
+            if (angle_close->IsNullChunk())
+            {
+               return(false);
+            }
+            Chunk *after_angle = angle_close->GetNextNcNnl();
+
+            if (after_angle->Is(E_Token::CT_DC_MEMBER))
+            {
+               tmp = after_angle;
+               continue;
+            }
+            return(false);
+         }
+         return(false);
+      }
+   }
+
+   if (func_name->IsNullChunk())
+   {
+      return(false);
+   }
+
+   // Verify func_name looks like a function name
+   if (  !func_name->Is(E_Token::CT_WORD)
+      && !func_name->Is(E_Token::CT_FUNC_CALL)
+      && !func_name->Is(E_Token::CT_FUNC_DEF)
+      && !func_name->Is(E_Token::CT_FUNC_PROTO))
+   {
+      return(false);
+   }
+   // Check if prev looks like a return type (declaration context)
+   Chunk const *before_prev = prev->GetPrevNcNnlNi();
+
+   // Walk back through namespace-qualified types (ns::Type or ns1::ns2::Type)
+   while (  before_prev->Is(E_Token::CT_DC_MEMBER)
+         || before_prev->Is(E_Token::CT_TYPE)
+         || before_prev->Is(E_Token::CT_WORD))
+   {
+      Chunk *tmp2 = before_prev->GetPrevNcNnlNi();
+
+      if (tmp2->IsNullChunk())
+      {
+         before_prev = tmp2;
+         break;
+      }
+      before_prev = tmp2;
+   }
+   // Declaration context indicators:
+   // - Start of statement: ;, {, }
+   // - Qualifiers: static, const, inline, virtual, explicit, etc
+   // - Template close: >
+   // - Access specifier: public:, private:, protected:
+   // - Start of file/function (no previous token)
+   // - Attribute: [[nodiscard]] etc.
+   // - Newline: start of line (for out-of-class definitions)
+   bool is_declaration_context = (  before_prev->IsNullChunk()
+                                 || before_prev->Is(E_Token::CT_SEMICOLON)
+                                 || before_prev->Is(E_Token::CT_BRACE_OPEN)
+                                 || before_prev->Is(E_Token::CT_BRACE_CLOSE)
+                                 || before_prev->Is(E_Token::CT_QUALIFIER)       // static, const, inline, etc.
+                                 || before_prev->Is(E_Token::CT_ANGLE_CLOSE)     // template<T>
+                                 || before_prev->Is(E_Token::CT_ACCESS_COLON)    // public:, private:
+                                 || before_prev->Is(E_Token::CT_VBRACE_OPEN)     // virtual brace
+                                 || before_prev->Is(E_Token::CT_VBRACE_CLOSE)
+                                 || before_prev->Is(E_Token::CT_NEWLINE)         // start of line
+                                 || before_prev->Is(E_Token::CT_ATTRIBUTE));     // [[nodiscard]] etc.
+
+   if (is_declaration_context)
+   {
+      LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && is rvalue ref in function return type\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+      pc->SetType(E_Token::CT_BYREF);
+      return(true);
+   }
+   return(false);
+} // handle_rvalue_function_decl
+
+
+static bool handle_rvalue_operator_decl(Chunk const *prev, Chunk *pc, Chunk *next)
+{
+   // Handle && in operator overload declarations with user-defined types
+   // Pattern 1: TypeName&& operator=(...) - return type rvalue reference
+   //   prev is E_Token::CT_WORD (TypeName), next is E_Token::CT_OPERATOR
+   // Pattern 2: operator=(TypeName&&) - parameter type rvalue reference
+   //   prev is E_Token::CT_WORD (TypeName), next is E_Token::CT_PAREN_CLOSE or E_Token::CT_COMMA
+
+   if (  !prev->Is(E_Token::CT_WORD)
+      && !prev->Is(E_Token::CT_PARAMETER_PACK))
+   {
+      return(false);
+   }
+   // Pattern 1: Return type in operator overload
+   // TypeName&& operator=(...);
+   // Typename&& ClassName::operator=(...);
+
+   // Check if next is directly E_Token::CT_OPERATOR or if next starts a class/namespace
+   // qualification that leads to E_Token::CT_OPERATOR
+   Chunk const *operator_chunk = next;
+
+   if (!next->Is(E_Token::CT_OPERATOR))
+   {
+      // Look past potential class/namespace qualification: Type::operator or ns::Class::operator
+      // Pattern: TYPE/WORD/PARAMETER_PACK :: [TYPE/WORD/PARAMETER_PACK ::] ... operator
+      if (  next->Is(E_Token::CT_TYPE)
+         || next->Is(E_Token::CT_WORD)
+         || next->Is(E_Token::CT_PARAMETER_PACK))
+      {
+         Chunk *tmp = next->GetNextNcNnl();
+
+         // Walk through the qualification chain: T::operator or ns::T::operator
+         while (  tmp->IsNotNullChunk()
+               && tmp->Is(E_Token::CT_DC_MEMBER))
+         {
+            tmp = tmp->GetNextNcNnl();  // Skip ::
+
+            if (tmp->IsNullChunk())
+            {
+               break;
+            }
+
+            if (tmp->Is(E_Token::CT_OPERATOR))
+            {
+               operator_chunk = tmp;
+               break;
+            }
+
+            // Continue if it's another namespace/class name
+            if (  tmp->Is(E_Token::CT_TYPE)
+               || tmp->Is(E_Token::CT_WORD)
+               || tmp->Is(E_Token::CT_PARAMETER_PACK))
+            {
+               tmp = tmp->GetNextNcNnl();
+            }
+            else
+            {
+               break;
+            }
+         }
+      }
+   }
+
+   if (operator_chunk->Is(E_Token::CT_OPERATOR))
+   {
+      // Check if prev looks like a return type (declaration context)
+      Chunk const *before_prev = prev->GetPrevNcNnlNi();
+
+      bool        is_declaration_context = (  before_prev->IsNullChunk()
+                                           || before_prev->Is(E_Token::CT_SEMICOLON)
+                                           || before_prev->Is(E_Token::CT_BRACE_OPEN)
+                                           || before_prev->Is(E_Token::CT_BRACE_CLOSE)
+                                           || before_prev->Is(E_Token::CT_QUALIFIER)    // static, const, inline, etc
+                                           || before_prev->Is(E_Token::CT_ANGLE_CLOSE)  // template<T>
+                                           || before_prev->Is(E_Token::CT_ACCESS_COLON) // public:, private:
+                                           || before_prev->Is(E_Token::CT_VBRACE_OPEN)
+                                           || before_prev->Is(E_Token::CT_VBRACE_CLOSE)
+                                           || before_prev->Is(E_Token::CT_FRIEND)
+                                           || before_prev->Is(E_Token::CT_ATTRIBUTE)); // [[nodiscard]] etc.
+
+      if (is_declaration_context)
+      {
+         LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && is rvalue ref in operator return type\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+         pc->SetType(E_Token::CT_BYREF);
+         return(true);
+      }
+   }
+
+   // Pattern 2: Parameter type in operator overload
+   // operator=(TypeName&&) or operator=(TypeName&&, ...)
+   if (  next->Is(E_Token::CT_PAREN_CLOSE)
+      || next->Is(E_Token::CT_FPAREN_CLOSE)
+      || next->Is(E_Token::CT_COMMA))
+   {
+      // Check if prev looks like a type in a parameter context
+      Chunk *before_prev = prev->GetPrevNcNnlNi();
+
+      bool  is_param_context = (  before_prev->Is(E_Token::CT_PAREN_OPEN)
+                               || before_prev->Is(E_Token::CT_FPAREN_OPEN)
+                               || before_prev->Is(E_Token::CT_COMMA)
+                               || before_prev->Is(E_Token::CT_QUALIFIER)); // const TypeName&&
+
+      if (is_param_context)
+      {
+         // Walk back to find if we're inside an operator declaration
+         Chunk const *tmp = before_prev;
+
+         while (tmp->IsNotNullChunk())
+         {
+            if (tmp->Is(E_Token::CT_OPERATOR))
+            {
+               LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && is rvalue ref in operator parameter\n",
+                       __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+               pc->SetType(E_Token::CT_BYREF);
+               return(true);
+            }
+
+            // Stop at statement boundaries
+            if (  tmp->Is(E_Token::CT_SEMICOLON)
+               || tmp->Is(E_Token::CT_BRACE_OPEN)
+               || tmp->Is(E_Token::CT_BRACE_CLOSE))
+            {
+               break;
+            }
+            tmp = tmp->GetPrevNcNnlNi();
+         }
+      }
+   }
+   return(false);
+} // handle_rvalue_operator_decl
+
+
+static bool handle_rvalue_decltype(Chunk const *prev, Chunk *pc, Chunk const *next)
+{
+   // Handle && after decltype(...) in function return or variable declaration context
+   // Pattern: decltype(...)&& funcName(...);
+   // Pattern: decltype(...)&& varName = ...;
+   // e.g, decltype(std::declval<T>())&& forwardDecltype(T&& t);
+   // e.g, decltype(getValue())&& decl = getValue();
+   // Here prev is E_Token::CT_PAREN_CLOSE and we need to find the matching E_Token::CT_DECLTYPE
+
+   if (!prev->Is(E_Token::CT_PAREN_CLOSE))
+   {
+      return(false);
+   }
+
+   if (  !next->Is(E_Token::CT_WORD)
+      && !next->Is(E_Token::CT_FUNC_CALL))
+   {
+      return(false);
+   }
+   Chunk const *after_next = next->GetNextNcNnl();
+
+   bool        is_function_decl = (  after_next->Is(E_Token::CT_PAREN_OPEN)
+                                  || after_next->Is(E_Token::CT_FPAREN_OPEN));
+   bool        is_variable_decl = after_next->Is(E_Token::CT_ASSIGN);
+
+   if (  !is_function_decl
+      && !is_variable_decl)
+   {
+      return(false);
+   }
+   // Walk back to find the matching open paren and check for decltype
+   Chunk const *open_paren = prev->GetOpeningParen();
+
+   if (open_paren->IsNullChunk())
+   {
+      return(false);
+   }
+   Chunk const *before_paren = open_paren->GetPrevNcNnlNi();
+
+   if (before_paren->Is(E_Token::CT_DECLTYPE))
+   {
+      pc->SetType(E_Token::CT_BYREF);
+      return(true);
+   }
+   return(false);
+} // handle_rvalue_decltype
+
+
+static bool handle_rvalue_namespace_qualified(Chunk const *prev, Chunk *pc, Chunk const *next)
+{
+   // Handle && after namespace-qualified types in function return context
+   // Pattern: ns1::ns2::Type&& funcName(...); or ns::Type&& funcName(...) { }
+   // Here prev is E_Token::CT_TYPE or E_Token::CT_WORD preceded by E_Token::CT_DC_MEMBER (::)
+   // and next is the function name (E_Token::CT_WORD or E_Token::CT_FUNC_CALL) followed by paren
+
+   if (  !prev->Is(E_Token::CT_TYPE)
+      && !prev->Is(E_Token::CT_WORD))
+   {
+      return(false);
+   }
+
+   if (  !next->Is(E_Token::CT_WORD)
+      && !next->Is(E_Token::CT_FUNC_CALL))
+   {
+      return(false);
+   }
+   Chunk *before_prev = prev->GetPrevNcNnlNi();
+
+   if (!before_prev->Is(E_Token::CT_DC_MEMBER))
+   {
+      return(false);
+   }
+   // Walk backward through the entire namespace-qualified chain
+   // Pattern: ns1::ns2::ns3::Type - we need to find what's before ns1
+   Chunk const *chain_start = before_prev;  // Currently at ::
+
+   while (chain_start->Is(E_Token::CT_DC_MEMBER))
+   {
+      // Move past the ::
+      chain_start = chain_start->GetPrevNcNnlNi();
+
+      if (chain_start->IsNullChunk())
+      {
+         break;
+      }
+
+      // Skip the name before ::
+      if (  chain_start->Is(E_Token::CT_WORD)
+         || chain_start->Is(E_Token::CT_TYPE))
+      {
+         chain_start = chain_start->GetPrevNcNnlNi();
+      }
+      else
+      {
+         break;
+      }
+   }
+
+   // Now chain_start points to the token before the namespace-qualified expression
+   // If it's a comparison/arithmetic/boolean operator, this is an expression context,
+   // not a type declaration - && should remain as boolean AND
+   if (  chain_start->Is(E_Token::CT_COMPARE)      // ==, !=, <, >, <=, >=
+      || chain_start->Is(E_Token::CT_ARITH)        // +, -, *, /, %, etc.
+      || chain_start->Is(E_Token::CT_BOOL)         // ||, &&
+      || chain_start->Is(E_Token::CT_ASSIGN)       // =, +=, -=, etc.
+      || chain_start->Is(E_Token::CT_RETURN))      // return Foo::a && bar
+   {
+      return(false);
+   }
+   Chunk const *after_next = next->GetNextNcNnl();
+
+   if (  after_next->Is(E_Token::CT_PAREN_OPEN)
+      || after_next->Is(E_Token::CT_FPAREN_OPEN))
+   {
+      pc->SetType(E_Token::CT_BYREF);
+      return(true);
+   }
+   return(false);
+} // handle_rvalue_namespace_qualified
+
+
+static bool handle_rvalue_forwarding_ref(Chunk const *prev, Chunk *pc, Chunk const *next)
+{
+   // Handle && as rvalue reference in function parameters when template parameter
+   // is classified as E_Token::CT_WORD instead of E_Token::CT_TYPE (forwarding references)
+   // Pattern: WORD/PARAMETER_PACK/TYPE && WORD inside function parameter list (FPAREN_OPEN parent)
+   // e.g, template<typename T> void func(T&& t);
+   // e.g, [](int&& x) { ... }
+   // Here T is E_Token::CT_WORD or E_Token::CT_PARAMETER_PACK, && should be E_Token::CT_BYREF, t is E_Token::CT_WORD
+
+   if (  !prev->Is(E_Token::CT_WORD)
+      && !prev->Is(E_Token::CT_PARAMETER_PACK)
+      && !prev->Is(E_Token::CT_TYPE))
+   {
+      return(false);
+   }
+   // Check if we're inside a function parameter list
+   Chunk const *open_paren = pc->GetParent();
+
+   // If GetParent doesn't give us the paren, search for it
+   if (  open_paren->IsNullChunk()
+      || (  !open_paren->Is(E_Token::CT_FPAREN_OPEN)
+         && !open_paren->Is(E_Token::CT_PAREN_OPEN)))
+   {
+      // Walk back to find the opening paren, stopping at statement boundaries
+      open_paren = Chunk::NullChunkPtr;
+
+      for (Chunk *tmp = pc->GetPrevNcNnlNi(); tmp->IsNotNullChunk(); tmp = tmp->GetPrevNcNnlNi())
+      {
+         if (  (  tmp->Is(E_Token::CT_FPAREN_OPEN)
+               || tmp->Is(E_Token::CT_PAREN_OPEN))
+            && tmp->GetLevel() == pc->GetLevel() - 1)
+         {
+            open_paren = tmp;
+            break;
+         }
+
+         // Stop at statement boundaries
+         if (  tmp->Is(E_Token::CT_SEMICOLON)
+            || tmp->Is(E_Token::CT_BRACE_OPEN)
+            || tmp->Is(E_Token::CT_BRACE_CLOSE))
+         {
+            break;
+         }
+      }
+   }
+
+   if (  open_paren->IsNullChunk()
+      || (  !open_paren->Is(E_Token::CT_FPAREN_OPEN)
+         && !open_paren->Is(E_Token::CT_PAREN_OPEN)))
+   {
+      return(false);
+   }
+
+   // If we found a plain E_Token::CT_PAREN_OPEN instead of FPAREN_OPEN, validate that it is
+   // actually a function/lambda parameter list and not a grouping paren in an expression
+   // like if ( !( a && b ) )
+   if (open_paren->Is(E_Token::CT_PAREN_OPEN))
+   {
+      Chunk const *before_open = open_paren->GetPrevNcNnlNi();
+
+      bool        is_func_paren = (  before_open->Is(E_Token::CT_FUNC_CALL)
+                                  || before_open->Is(E_Token::CT_FUNC_DEF)
+                                  || before_open->Is(E_Token::CT_FUNC_PROTO)
+                                  || before_open->Is(E_Token::CT_TSQUARE)      // [](int&& x)
+                                  || before_open->Is(E_Token::CT_SQUARE_CLOSE) // [captures](int&& x)
+                                  || before_open->Is(E_Token::CT_TYPE));       // type(T&& t)
+
+      if (!is_func_paren)
+      {
+         return(false);
+      }
+   }
+
+   // If we found an FPAREN_OPEN, check its parent type to distinguish
+   // function definitions/prototypes from function calls
+   if (open_paren->Is(E_Token::CT_FPAREN_OPEN))
+   {
+      E_Token paren_parent = open_paren->GetParentType();
+
+      // && inside a function call's argument list is always boolean
+      if (paren_parent == E_Token::CT_FUNC_CALL)
+      {
+         return(false);
+      }
+
+      // A FUNC_CTOR_VAR inside a function body is a variable construction
+      // like:  Object obj(a && b)
+      if (paren_parent == E_Token::CT_FUNC_CTOR_VAR && prev->Is(E_Token::CT_WORD))
+      {
+         Chunk const *func_name = open_paren->GetPrevNcNnlNi();
+
+         if (  func_name->IsNotNullChunk()
+            && func_name->Is(E_Token::CT_FUNC_CTOR_VAR)
+            && func_name->GetBraceLevel() >= 1)
+         {
+            // Check if we're inside a function body and not just inside a namespace/class/struct brace.
+            Chunk const *br_open = func_name->GetPrevType(E_Token::CT_BRACE_OPEN, func_name->GetBraceLevel() - 1);
+
+            if (  br_open->IsNotNullChunk()
+               && br_open->GetParentType() != E_Token::CT_NAMESPACE
+               && br_open->GetParentType() != E_Token::CT_CLASS
+               && br_open->GetParentType() != E_Token::CT_STRUCT
+               && br_open->GetParentType() != E_Token::CT_EXTERN)
+            {
+               return(false); // Inside a function body - this is a constructor call
+            }
+         }
+      }
+   }
+   // In a parameter declaration like `func(T&& varname)`, the variable name
+   // is followed by declaration-ending tokens: ), comma, =, or ...
+   bool next_is_param_context = (  next->Is(E_Token::CT_FPAREN_CLOSE)  // End of params: T&&)
+                                || next->Is(E_Token::CT_PAREN_CLOSE)   // End of params: T&&)
+                                || next->Is(E_Token::CT_COMMA)         // Next param: T&&,
+                                || next->Is(E_Token::CT_ELLIPSIS));    // Variadic: T&&...
+
+   if (next->Is(E_Token::CT_WORD))
+   {
+      Chunk const *after_next = next->GetNextNcNnl();
+
+      // In a parameter declaration, the variable name can only be followed by:
+      //   - ) or , (end of parameter)
+      //   - = (default value assignment)
+      //   - [ followed by ] and then ) or , (array parameter)
+      // Anything else means this is an expression, not a declaration
+      bool is_decl_ending = (  after_next->Is(E_Token::CT_FPAREN_CLOSE)
+                            || after_next->Is(E_Token::CT_PAREN_CLOSE)
+                            || after_next->Is(E_Token::CT_COMMA)
+                            || after_next->Is(E_Token::CT_ASSIGN));
+
+      if (!is_decl_ending)
+      {
+         return(false);  // This is an expression, not a parameter declaration
+      }
+      next_is_param_context = true;
+   }
+
+   if (!next_is_param_context)
+   {
+      return(false);
+   }
+   // Make sure prev (the WORD) looks like a type name
+   // by checking what comes before it - should be (, comma, qualifier, or attribute
+   Chunk const *before_prev = prev->GetPrevNcNnlNi();
+
+   bool        is_param_decl_context = (  before_prev->Is(E_Token::CT_FPAREN_OPEN)
+                                       || before_prev->Is(E_Token::CT_PAREN_OPEN)
+                                       || before_prev->Is(E_Token::CT_COMMA)
+                                       || before_prev->Is(E_Token::CT_QUALIFIER)   // const T&&
+                                       || before_prev->Is(E_Token::CT_BYREF)       // chained refs
+                                       || before_prev->Is(E_Token::CT_PTR_TYPE)    // pointer before
+                                       || before_prev->Is(E_Token::CT_ANGLE_CLOSE) // after template: Container<T>&&
+                                       || before_prev->Is(E_Token::CT_ATTRIBUTE)); // [[maybe_unused]] int&& x
+
+   if (is_param_decl_context)
+   {
+      pc->SetType(E_Token::CT_BYREF);
+      return(true);
+   }
+   return(false);
+} // handle_rvalue_forwarding_ref
+
+
+static bool handle_rvalue_trailing_return(Chunk *prev, Chunk *pc, Chunk const *next)
+{
+   // Handle && in trailing return type context
+   // Pattern: auto func() -> int&&; or auto func() -> SomeType&&
+   // Pattern: auto func() -> ns::Type&&; (namespace-qualified)
+   // Pattern: auto func(int&& x) -> int&&; (with rvalue param)
+   // Pattern: [...](...) -> Type&& { } (lambda trailing return)
+   //
+   // In these cases:
+   //   - prev is E_Token::CT_TYPE or E_Token::CT_WORD (the return type)
+   //   - pc is E_Token::CT_BOOL (&&)
+   //   - next is E_Token::CT_SEMICOLON or E_Token::CT_BRACE_OPEN
+   //   - Walking back from prev, we should find E_Token::CT_TRAILING_RET, E_Token::CT_CPP_LAMBDA_RET,
+   //     or E_Token::CT_MEMBER (->)
+   //     Note: At this stage of processing, the trailing return arrow may still
+   //     be E_Token::CT_MEMBER instead of E_Token::CT_TRAILING_RET
+
+   if (  !prev->Is(E_Token::CT_TYPE)
+      && !prev->Is(E_Token::CT_WORD)
+      && !prev->Is(E_Token::CT_PARAMETER_PACK))
+   {
+      return(false);
+   }
+
+   if (  !next->Is(E_Token::CT_SEMICOLON)
+      && !next->Is(E_Token::CT_BRACE_OPEN))
+   {
+      return(false);
+   }
+   // Walk back from prev to find E_Token::CT_TRAILING_RET, E_Token::CT_CPP_LAMBDA_RET, or E_Token::CT_MEMBER (->)
+   // We may encounter: type names, ::, qualifiers (const), angle brackets for templates
+   Chunk const *tmp = prev;
+
+   while (tmp->IsNotNullChunk())
+   {
+      if (  tmp->Is(E_Token::CT_TRAILING_RET)
+         || tmp->Is(E_Token::CT_CPP_LAMBDA_RET))
+      {
+         pc->SetType(E_Token::CT_BYREF);
+         return(true);
+      }
+
+      // Check for E_Token::CT_MEMBER with "->" - this is the trailing return arrow before reclassification
+      if (  tmp->Is(E_Token::CT_MEMBER)
+         && tmp->IsString("->"))
+      {
+         // Verify this looks like a trailing return context by checking
+         // that the previous token is a close paren (function signature)
+         Chunk const *before_arrow = tmp->GetPrevNcNnlNi();
+
+         if (  before_arrow->Is(E_Token::CT_FPAREN_CLOSE)
+            || before_arrow->Is(E_Token::CT_PAREN_CLOSE)
+            || before_arrow->Is(E_Token::CT_LPAREN_CLOSE)   // lambda parameters
+            || before_arrow->Is(E_Token::CT_QUALIFIER)      // const, noexcept, etc
+            || before_arrow->Is(E_Token::CT_REF_QUALIFIER)) // &&, & ref-qualifiers
+         {
+            pc->SetType(E_Token::CT_BYREF);
+            return(true);
+         }
+      }
+
+      // Stop if we hit something that indicates we're not in a trailing return context
+      if (  tmp->Is(E_Token::CT_SEMICOLON)
+         || tmp->Is(E_Token::CT_BRACE_OPEN)
+         || tmp->Is(E_Token::CT_BRACE_CLOSE)
+         || tmp->Is(E_Token::CT_ASSIGN)
+         || tmp->Is(E_Token::CT_SQUARE_CLOSE)   // End of lambda capture list
+         || tmp->Is(E_Token::CT_LPAREN_CLOSE))  // End of lambda parameters (without arrow)
+      {
+         return(false);
+      }
+
+      // Continue walking back through valid trailing return type tokens
+      if (  tmp->Is(E_Token::CT_TYPE)
+         || tmp->Is(E_Token::CT_WORD)
+         || tmp->Is(E_Token::CT_PARAMETER_PACK) // template parameters like T
+         || tmp->Is(E_Token::CT_DC_MEMBER)      // ::
+         || tmp->Is(E_Token::CT_QUALIFIER)      // const, noexcept, etc
+         || tmp->Is(E_Token::CT_ANGLE_CLOSE)    // end of template args
+         || tmp->Is(E_Token::CT_ANGLE_OPEN)     // start of template args
+         || tmp->Is(E_Token::CT_COMMA)          // template arg separator
+         || tmp->Is(E_Token::CT_PTR_TYPE)       // pointer
+         || tmp->Is(E_Token::CT_BYREF)          // lvalue reference
+         || tmp->Is(E_Token::CT_ARITH)          // could be part of template expression
+         || tmp->Is(E_Token::CT_NUMBER))        // could be template non-type arg
+      {
+         tmp = tmp->GetPrevNcNnlNi();
+         continue;
+      }
+      // If we hit something unexpected, stop
+      return(false);
+   }
+   return(false);
+} // handle_rvalue_trailing_return
+
+
+static bool handle_rvalue_after_type(Chunk *prev, Chunk *pc)
+{
+   // Issue #548: inline T && someFunc(foo * *p, bar && q) { }
+   if (pc->TestFlags(PCF_IN_PREPROC))
+   {
+      return(false);
+   }
+
+   // Check for E_Token::CT_PARAMETER_PACK directly (template parameters like T)
+   if (prev->Is(E_Token::CT_PARAMETER_PACK))
+   {
+      Chunk const *next = pc->GetNextNcNnl();
+
+      // If next is a word (variable name) and we can find an assignment or semicolon,
+      // this is a variable declaration
+      if (next->Is(E_Token::CT_WORD))
+      {
+         Chunk const *after_word = next->GetNextNcNnl();
+
+         if (  after_word->Is(E_Token::CT_ASSIGN)
+            || after_word->Is(E_Token::CT_SEMICOLON))
+         {
+            pc->SetType(E_Token::CT_BYREF);
+            return(true);
+         }
+      }
+   }
+
+   if (!chunk_ends_type(prev))
+   {
+      return(false);
+   }
+   Chunk const *tmp = prev;
+   LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu, Text() '%s', type is %s\n",
+           __func__, __LINE__, tmp->GetOrigLine(), tmp->GetOrigCol(),
+           tmp->GetLogText(), get_token_name(tmp->GetType()));
+   log_pcf_flags(LFCNR, tmp->GetFlags());
+
+   // look for a type
+   if (tmp->Is(E_Token::CT_TYPE))
+   {
+      LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu, Text() '%s', type is %s\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(),
+              pc->GetLogText(), get_token_name(pc->GetType()));
+      log_pcf_flags(LFCNR, pc->GetFlags());
+      pc->SetType(E_Token::CT_BYREF);
+      return(true);
+   }
+   // look next, is there a "assign" before the ";"
+   Chunk const *semi = pc->GetNextType(E_Token::CT_SEMICOLON, pc->GetLevel());                // Issue #2688
+
+   if (semi->IsNotNullChunk())
+   {
+      LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu, Text() '%s', type is %s\n",
+              __func__, __LINE__, semi->GetOrigLine(), semi->GetOrigCol(),
+              semi->GetLogText(), get_token_name(semi->GetType()));
+
+      for (Chunk const *test_it = pc; test_it != semi; test_it = test_it->GetNext())
+      {
+         LOG_FMT(LFCNR, "%s(%d): test_it orig line is %zu, orig col is %zu, Text() '%s', type is %s\n",
+                 __func__, __LINE__, test_it->GetOrigLine(), test_it->GetOrigCol(),
+                 test_it->GetLogText(), get_token_name(test_it->GetType()));
+
+         if (test_it->Is(E_Token::CT_ASSIGN))
+         {
+            // the statement is an assignment
+            // && is before assign
+            pc->SetType(E_Token::CT_BYREF);
+            return(true);
+         }
+      }
+   }
+   return(false);
+} // handle_rvalue_after_type
+
+
+static bool handle_rvalue_in_sparen(Chunk const *prev, Chunk *pc, Chunk const *next)
+{
+   // Handle && in statement parentheses (for, if, switch)
+   //
+   // For range-based for loops:
+   //   Pattern: for (Type&& var : range) - && is BYREF (rvalue/forwarding reference)
+   //
+   // For C++17 init-if/init-switch statements:
+   //   if (init; condition) or switch (init; condition)
+   //   The && in the condition part (after semicolon) should be E_Token::CT_BOOL (logical and).
+   //   The && in the init part (before semicolon) may be E_Token::CT_BYREF (rvalue reference).
+
+   // Check if we're inside statement parentheses
+   if (!pc->TestFlags(PCF_IN_SPAREN))
+   {
+      return(false);
+   }
+   // Find the opening SPAREN
+   Chunk const *sparen_open = pc->GetPrevType(E_Token::CT_SPAREN_OPEN, pc->GetLevel() - 1);
+
+   if (sparen_open->IsNullChunk())
+   {
+      return(false);
+   }
+   E_Token parent_type = sparen_open->GetParentType();
+
+   // Handle range-based for loops: for (Type&& var : range)
+   if (parent_type == E_Token::CT_FOR)
+   {
+      // Check the pattern: prev should be a type, next should be a word (variable name)
+      // For template types like vector<int>&&, prev is E_Token::CT_ANGLE_CLOSE
+      if (  !prev->Is(E_Token::CT_TYPE)
+         && !prev->Is(E_Token::CT_WORD)         // User-defined types may still be E_Token::CT_WORD at this stage
+         && !prev->Is(E_Token::CT_ANGLE_CLOSE)) // Template types like vector<int>
+      {
+         return(false);
+      }
+
+      if (!next->Is(E_Token::CT_WORD))
+      {
+         return(false);
+      }
+      // Look for a colon after the variable name (next) to confirm this is a range-based for loop.
+      // At this stage of processing the colon is still E_Token::CT_COLON with PCF_IN_FOR flag
+      Chunk const *after_next = next->GetNextNcNnl();
+
+      if (  after_next->Is(E_Token::CT_COLON)
+         && after_next->TestFlags(PCF_IN_FOR))
+      {
+         LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && is rvalue ref in range-based for loop\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+         pc->SetType(E_Token::CT_BYREF);
+         return(true);
+      }
+      return(false);
+   }
+
+   // Handle C++17 init-if/init-switch statements
+   if (  parent_type == E_Token::CT_IF
+      || parent_type == E_Token::CT_SWITCH)
+   {
+      // Look for a semicolon between SPAREN_OPEN and pc
+      bool found_semicolon_before = false;
+
+      for (Chunk const *tmp = sparen_open->GetNext(); tmp != pc && tmp->IsNotNullChunk(); tmp = tmp->GetNext())
+      {
+         if (tmp->Is(E_Token::CT_SEMICOLON))
+         {
+            found_semicolon_before = true;
+            break;
+         }
+
+         if (  tmp->Is(E_Token::CT_SPAREN_CLOSE)
+            || tmp->GetLevel() < sparen_open->GetLevel())
+         {
+            break;
+         }
+      }
+
+      if (found_semicolon_before)
+      {
+         // We're in the condition part (after the semicolon)
+         // The && should be E_Token::CT_BOOL (logical and), which is already the default
+         // Return true to prevent other handlers from converting it to BYREF
+         LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && in condition part of init-if, keeping as BOOL\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+         return(true);
+      }
+
+      // We're in the init part (before semicolon or no semicolon at all)
+      // Check if this is an rvalue reference: TYPE && var = ...
+      // prev should be a TYPE, next should be a WORD (variable name)
+      // For template types like vector<int>&&, prev is E_Token::CT_ANGLE_CLOSE
+      if (  (  prev->Is(E_Token::CT_TYPE)
+            || prev->Is(E_Token::CT_WORD)          // User-defined types may be E_Token::CT_WORD
+            || prev->Is(E_Token::CT_ANGLE_CLOSE))  // Template types like vector<int>
+         && next->Is(E_Token::CT_WORD))
+      {
+         // Look ahead: if there's an = after next followed by a semicolon, this is a variable declaration
+         // Pattern: type && var = value; ...
+         Chunk const *after_next = next->GetNextNcNnl();
+
+         if (after_next->Is(E_Token::CT_ASSIGN))
+         {
+            for (Chunk const *tmp = after_next->GetNext(); tmp->IsNotNullChunk(); tmp = tmp->GetNext())
+            {
+               // Skip over brace and paren pairs to avoid matching semicolons inside nested blocks
+               if (  tmp->Is(E_Token::CT_BRACE_OPEN)
+                  || tmp->Is(E_Token::CT_PAREN_OPEN)
+                  || tmp->Is(E_Token::CT_FPAREN_OPEN))
+               {
+                  tmp = tmp->GetClosingParen();
+
+                  if (tmp->IsNullChunk())
+                  {
+                     break;
+                  }
+                  continue;
+               }
+
+               if (tmp->Is(E_Token::CT_SEMICOLON))
+               {
+                  LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && is rvalue ref in init part of init-if\n",
+                          __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+                  pc->SetType(E_Token::CT_BYREF);
+                  return(true);
+               }
+
+               if (  tmp->Is(E_Token::CT_SPAREN_CLOSE)
+                  || tmp->GetLevel() < sparen_open->GetLevel())
+               {
+                  LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - no semicolon in sparen, && is BOOL in plain condition\n",
+                          __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+                  return(false);
+               }
+            }
+         }
+      }
+   }
+   return(false);
+} // handle_rvalue_in_sparen
+
+
+static bool handle_rvalue_using_alias(Chunk *prev, Chunk *pc, Chunk const *next)
+{
+   // Handle && in using alias declarations
+   // Pattern: using Name = Type&&;
+   // Pattern: using Name = Type&& (*)(Args...);  - function pointer with rvalue return type
+   // Pattern: using Name = void (int&&);  - function type with rvalue parameter
+
+   if (pc->GetParentType() != E_Token::CT_USING_ALIAS)
+   {
+      return(false);
+   }
+
+   // Check if prev is a type or word (the type before &&)
+   // For namespace-qualified types like std::string, prev will be E_Token::CT_TYPE or E_Token::CT_WORD
+   // For template types like std::vector<int>, prev will be E_Token::CT_ANGLE_CLOSE
+   if (  !prev->Is(E_Token::CT_TYPE)
+      && !prev->Is(E_Token::CT_WORD)
+      && !prev->Is(E_Token::CT_ANGLE_CLOSE))
+   {
+      return(false);
+   }
+   // Check if next indicates end of type or start of function pointer syntax
+   // Pattern 1: Type&&;  - next is semicolon
+   // Pattern 2: Type&& (*)(...)  - next is '(' starting function pointer syntax
+   // Pattern 3: Type&&) in function type: using F = void (int&&); - next is PAREN_CLOSE
+   bool is_func_ptr_syntax = false;
+   bool is_func_type_param = false;
+
+   if (next->Is(E_Token::CT_PAREN_CLOSE))
+   {
+      // Could be Pattern 3: function type parameter (int&&)
+      // Walk back from prev to find if we're inside a function type parentheses
+      // Pattern: = void (int&&) where we're at the && inside (int&&)
+      int paren_depth = 0;
+
+      for (Chunk const *tmp = pc->GetPrevNcNnlNi(); tmp->IsNotNullChunk(); tmp = tmp->GetPrevNcNnlNi())
+      {
+         if (tmp->Is(E_Token::CT_PAREN_CLOSE))
+         {
+            paren_depth++;
+         }
+         else if (tmp->Is(E_Token::CT_PAREN_OPEN))
+         {
+            if (paren_depth == 0)
+            {
+               // Found the opening paren, check what's before it
+               Chunk const *before_paren = tmp->GetPrevNcNnlNi();
+
+               if (  before_paren->Is(E_Token::CT_TYPE)
+                  || before_paren->Is(E_Token::CT_WORD))
+               {
+                  is_func_type_param = true;
+               }
+               break;
+            }
+            paren_depth--;
+         }
+         else if (  tmp->Is(E_Token::CT_SEMICOLON)
+                 || tmp->Is(E_Token::CT_BRACE_OPEN)
+                 || tmp->Is(E_Token::CT_BRACE_CLOSE))
+         {
+            break;
+         }
+      }
+   }
+
+   if (next->Is(E_Token::CT_PAREN_OPEN))
+   {
+      // Check for anonymous function pointer pattern: && ( * ) (
+      Chunk const *star = next->GetNextNcNnl();
+
+      if (  star->IsNotNullChunk()
+         && (  star->Is(E_Token::CT_DEREF)
+            || star->Is(E_Token::CT_PTR_TYPE)
+            || star->Is(E_Token::CT_STAR)))
+      {
+         Chunk const *close_paren = star->GetNextNcNnl();
+
+         if (  close_paren->IsNotNullChunk()
+            && close_paren->Is(E_Token::CT_PAREN_CLOSE))
+         {
+            Chunk const *param_paren = close_paren->GetNextNcNnl();
+
+            if (  param_paren->IsNotNullChunk()
+               && (  param_paren->Is(E_Token::CT_PAREN_OPEN)
+                  || param_paren->Is(E_Token::CT_FPAREN_OPEN)))
+            {
+               is_func_ptr_syntax = true;
+            }
+         }
+      }
+   }
+
+   if (  !next->Is(E_Token::CT_SEMICOLON)
+      && !is_func_ptr_syntax
+      && !is_func_type_param)
+   {
+      return(false);
+   }
+   // This is && in a using alias type declaration - mark as BYREF
+   LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && is rvalue ref in using alias\n",
+           __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+
+   // Also mark the previous token as a type if it's a WORD
+   if (prev->Is(E_Token::CT_WORD))
+   {
+      prev->SetType(E_Token::CT_TYPE);
+   }
+   pc->SetType(E_Token::CT_BYREF);
+   return(true);
+} // handle_rvalue_using_alias
+
+
+static bool handle_bool_inside_expression_context(Chunk const *prev, Chunk *pc, Chunk *next)
+{
+   UNUSED(next);
+
+   // Handle && inside decltype(...) or noexcept(...) - this should remain as BOOL
+   // Pattern: decltype(a && b) or noexcept(a && b) - the && is a boolean expression, not a reference
+   // But: decltype(helper<T&&>(t)) - the && inside <> is a rvalue reference (BYREF)
+   // We need to walk backward to find if we're inside decltype(...) or noexcept(...)
+
+   // First, check if we're inside angle brackets (template context)
+   // If so, && is likely a rvalue reference, not a boolean operator
+   Chunk const *angle_check = pc->GetPrevNcNnlNi();
+   int         angle_depth  = 0;
+
+   while (angle_check->IsNotNullChunk())
+   {
+      if (angle_check->Is(E_Token::CT_ANGLE_CLOSE))
+      {
+         angle_depth++;
+      }
+      else if (angle_check->Is(E_Token::CT_ANGLE_OPEN))
+      {
+         if (angle_depth == 0)
+         {
+            // We're inside angle brackets - this is a type context
+            // && should be BYREF, not BOOL - let other handlers deal with it
+            LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && inside angle brackets in expression context, not marking as BOOL\n",
+                    __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+            return(false);
+         }
+         angle_depth--;
+      }
+      else if (  angle_check->Is(E_Token::CT_PAREN_OPEN)
+              || angle_check->Is(E_Token::CT_SEMICOLON)
+              || angle_check->Is(E_Token::CT_BRACE_OPEN)
+              || angle_check->Is(E_Token::CT_BRACE_CLOSE))
+      {
+         // Hit a boundary before finding unmatched angle bracket
+         break;
+      }
+      angle_check = angle_check->GetPrevNcNnlNi();
+   }
+   // Walk backward to find the opening paren that contains this &&
+   Chunk const *tmp = pc->GetPrevNcNnlNi();
+
+   while (tmp->IsNotNullChunk())
+   {
+      if (tmp->Is(E_Token::CT_PAREN_OPEN))
+      {
+         // Check if this paren's parent is decltype or noexcept
+         E_Token parent_type = tmp->GetParentType();
+
+         if (  parent_type == E_Token::CT_DECLTYPE
+            || parent_type == E_Token::CT_NOEXCEPT)
+         {
+            // Check if prev is a type - if so, && is a rvalue reference, not boolean AND
+            // Pattern: decltype(int&&) - prev is E_Token::CT_TYPE (int), && should be BYREF
+            // Pattern: decltype(a && b) - prev is E_Token::CT_WORD (a), && should be BOOL
+            // Pattern: decltype(T&&) - prev is E_Token::CT_WORD (T), next is ), && should be BYREF
+            if (  prev->Is(E_Token::CT_TYPE)
+               || prev->Is(E_Token::CT_QUALIFIER)
+               || prev->Is(E_Token::CT_STRUCT)
+               || prev->Is(E_Token::CT_ENUM)
+               || prev->Is(E_Token::CT_UNION))
+            {
+               LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && after type inside %s, setting to BYREF\n",
+                       __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), get_token_name(parent_type));
+               pc->SetType(E_Token::CT_BYREF);
+               return(true);
+            }
+
+            // Check for pattern: decltype(T&&) where T is a template parameter (E_Token::CT_WORD or E_Token::CT_PARAMETER_PACK)
+            // If next is closing paren, this is likely a type, not a boolean expression
+            if (  (  prev->Is(E_Token::CT_WORD)
+                  || prev->Is(E_Token::CT_PARAMETER_PACK))
+               && next->Is(E_Token::CT_PAREN_CLOSE))
+            {
+               LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && after word before ) inside %s, setting to BYREF\n",
+                       __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), get_token_name(parent_type));
+               pc->SetType(E_Token::CT_BYREF);
+               return(true);
+            }
+            // We're inside decltype/noexcept(...), && should be BOOL
+            LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && is BOOL inside %s\n",
+                    __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), get_token_name(parent_type));
+            // Return true to prevent other handlers from converting to BYREF
+            // The token is already E_Token::CT_BOOL, so we don't need to change it
+            return(true);
+         }
+         return(false);
+      }
+
+      if (tmp->Is(E_Token::CT_PAREN_CLOSE))
+      {
+         // Skip over nested parens
+         tmp = tmp->GetOpeningParen();
+
+         if (tmp->IsNullChunk())
+         {
+            return(false);
+         }
+         tmp = tmp->GetPrevNcNnlNi();
+         continue;
+      }
+
+      if (  tmp->Is(E_Token::CT_SEMICOLON)
+         || tmp->Is(E_Token::CT_BRACE_OPEN)
+         || tmp->Is(E_Token::CT_BRACE_CLOSE))
+      {
+         // Hit a statement boundary, not inside expression context
+         return(false);
+      }
+      tmp = tmp->GetPrevNcNnlNi();
+   }
+   return(false);
+} // handle_bool_inside_expression_context
+
+
+static bool handle_ternary_bool_context(Chunk *prev, Chunk const *pc, Chunk *next)
+{
+   UNUSED(prev);
+
+   // Handle && in ternary conditional expressions.
+   // When && is part of a ternary condition like (a && b) ? x : y, it should
+   // remain as E_Token::CT_BOOL, not be converted to E_Token::CT_BYREF.
+   //
+   // Pattern: (expr1 && expr2) ? ... - && should be BOOL
+   // Pattern: void mixed_default(int&& x = (a && b) ? 1 : 2); - && inside () before ? should be BOOL
+   // Pattern: auto x = (a && b) ? std::move(c) : (d && e) ? std::move(f) : g; - multiple ternaries
+   //
+   // Walk forward from pc (the &&) to see if we hit a E_Token::CT_QUESTION before
+   // hitting statement boundaries (;, {, etc.).
+
+   Chunk const *tmp        = next;
+   bool        seen_assign = false;
+
+   while (tmp->IsNotNullChunk())
+   {
+      // Track if we see an assignment operator
+      // If && comes before = and ? comes after = then && is not part of the ternary condition
+      // Pattern: int&& ref = (x > 0) ? a : b; - && is rvalue ref, not ternary condition
+      if (tmp->Is(E_Token::CT_ASSIGN))
+      {
+         seen_assign = true;
+      }
+
+      if (tmp->Is(E_Token::CT_QUESTION))
+      {
+         // If we saw an assignment before the ?, then && is on the left side of =
+         // and is not part of the ternary condition
+         if (seen_assign)
+         {
+            LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && before = before ?, not ternary condition\n",
+                    __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+            return(false);
+         }
+         // This && is part of a ternary condition, keep as BOOL
+         LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && before ? in ternary, keeping as BOOL\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+         return(true);
+      }
+
+      // Stop at statement boundaries
+      if (  tmp->Is(E_Token::CT_SEMICOLON)
+         || tmp->Is(E_Token::CT_BRACE_OPEN)
+         || tmp->Is(E_Token::CT_BRACE_CLOSE))
+      {
+         break;
+      }
+
+      // Stop at comma (function argument/template separator)
+      if (tmp->Is(E_Token::CT_COMMA))
+      {
+         break;
+      }
+
+      // Skip over parentheses and angle brackets
+      // Pattern: (a && foo(x)) ? 1 : 2 - need to skip over (x) to find the ?
+      // Pattern: (a && foo<int>()) ? 1 : 2 - need to skip over <int> to find the ?
+      if (  tmp->Is(E_Token::CT_PAREN_OPEN)
+         || tmp->Is(E_Token::CT_FPAREN_OPEN)
+         || tmp->Is(E_Token::CT_ANGLE_OPEN))
+      {
+         Chunk *close = tmp->GetClosingParen();
+
+         if (close->IsNotNullChunk())
+         {
+            tmp = close;
+         }
+      }
+      tmp = tmp->GetNextNcNnl();
+   }
+   return(false);
+} // handle_ternary_bool_context
+
+
+static bool handle_rvalue_conversion_operator(Chunk *prev, Chunk *pc, Chunk const *next)
+{
+   // Handle && in conversion operator return types
+   // Pattern: operator int&&() - && should be BYREF
+   // Pattern: operator std::string&&() - && should be BYREF
+   // Pattern: operator T&&() - && should be BYREF (template conversion)
+
+   // Check if next is a paren open (the parameter list of the conversion operator)
+   if (!next->Is(E_Token::CT_PAREN_OPEN))
+   {
+      return(false);
+   }
+
+   // Check if prev is a type/word that could be part of a conversion operator return type
+   if (  !prev->Is(E_Token::CT_TYPE)
+      && !prev->Is(E_Token::CT_WORD)
+      && !prev->Is(E_Token::CT_OPERATOR_VAL)
+      && !prev->Is(E_Token::CT_PARAMETER_PACK))
+   {
+      return(false);
+   }
+   // Walk back from prev to find the operator keyword
+   // We may encounter: type names, ::, const, etc.
+   Chunk const *tmp = prev;
+
+   while (tmp->IsNotNullChunk())
+   {
+      if (tmp->Is(E_Token::CT_OPERATOR))
+      {
+         // This is a conversion operator, && is an rvalue reference
+         LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && is rvalue ref in conversion operator return type\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+         pc->SetType(E_Token::CT_BYREF);
+         return(true);
+      }
+
+      // Continue walking back through valid conversion operator type tokens
+      if (  tmp->Is(E_Token::CT_TYPE)
+         || tmp->Is(E_Token::CT_WORD)
+         || tmp->Is(E_Token::CT_OPERATOR_VAL)
+         || tmp->Is(E_Token::CT_DC_MEMBER)       // ::
+         || tmp->Is(E_Token::CT_QUALIFIER)       // const, etc
+         || tmp->Is(E_Token::CT_PARAMETER_PACK)  // T in template
+         || tmp->Is(E_Token::CT_ANGLE_CLOSE)     // end of template args
+         || tmp->Is(E_Token::CT_ANGLE_OPEN)      // start of template args
+         || tmp->Is(E_Token::CT_COMMA))          // template arg separator
+      {
+         tmp = tmp->GetPrevNcNnlNi();
+         continue;
+      }
+      // If we hit something else (like semicolon, brace, etc.), stop
+      break;
+   }
+   return(false);
+} // handle_rvalue_conversion_operator
+
+
+static bool handle_rvalue_func_ptr_params(Chunk const *prev, Chunk *pc, Chunk const *next)
+{
+   // Handle && in function pointer or member function pointer type declarations.
+   // Pattern: int&& (*func_ptr)(int&&, T&&);
+   // Pattern: using MFP = Type&& (Class::*)(Args&&);
+
+   // Check if prev is a type (the type before &&)
+   if (  !prev->Is(E_Token::CT_TYPE)
+      && !prev->Is(E_Token::CT_WORD)
+      && !prev->Is(E_Token::CT_ANGLE_CLOSE))
+   {
+      return(false);
+   }
+
+   // Check if next is ) or , (end of parameter or next parameter)
+   if (  !next->Is(E_Token::CT_PAREN_CLOSE)
+      && !next->Is(E_Token::CT_FPAREN_CLOSE)
+      && !next->Is(E_Token::CT_COMMA))
+   {
+      return(false);
+   }
+   // Now we need to verify we're inside a function pointer parameter list.
+   // Walk backward to find an opening paren that is part of a function pointer pattern.
+   // The pattern is: (...*...) ( <-- we're inside this paren
+
+   Chunk const *paren_open = Chunk::NullChunkPtr;
+
+   // Find the containing paren by walking back
+   int paren_depth = 0;
+
+   for (Chunk *tmp = pc->GetPrevNcNnlNi(); tmp->IsNotNullChunk(); tmp = tmp->GetPrevNcNnlNi())
+   {
+      if (  tmp->Is(E_Token::CT_PAREN_CLOSE)
+         || tmp->Is(E_Token::CT_FPAREN_CLOSE))
+      {
+         paren_depth++;
+      }
+      else if (  tmp->Is(E_Token::CT_PAREN_OPEN)
+              || tmp->Is(E_Token::CT_FPAREN_OPEN))
+      {
+         if (paren_depth == 0)
+         {
+            paren_open = tmp;
+            break;
+         }
+         paren_depth--;
+      }
+      else if (  tmp->Is(E_Token::CT_SEMICOLON)
+              || tmp->Is(E_Token::CT_BRACE_OPEN)
+              || tmp->Is(E_Token::CT_BRACE_CLOSE))
+      {
+         // Hit statement boundary without finding opening paren
+         return(false);
+      }
+   }
+
+   if (paren_open->IsNullChunk())
+   {
+      return(false);
+   }
+   // Check what's before the paren_open.
+   // For function pointer pattern, we expect something like:
+   //   (*func_ptr)( or (Class::*)( or &&(
+   Chunk *before_paren = paren_open->GetPrevNcNnlNi();
+
+   if (before_paren->IsNullChunk())
+   {
+      return(false);
+   }
+
+   // Check for function pointer patterns:
+   // - PAREN_CLOSE followed by PAREN_OPEN: (*func_ptr)(...)
+   // - BYREF or BOOL (&&) followed by PAREN_OPEN: Type&& (Class::*)(...)
+   // - ANGLE_CLOSE followed by PAREN_OPEN: std::vector<int>&& (Class::*)(...)
+   if (  before_paren->Is(E_Token::CT_PAREN_CLOSE)
+      || before_paren->Is(E_Token::CT_BYREF)
+      || (  before_paren->Is(E_Token::CT_BOOL)
+         && before_paren->IsString("&&"))
+      || before_paren->Is(E_Token::CT_ANGLE_CLOSE))
+   {
+      // Find the E_Token::CT_PAREN_CLOSE to check for pointer pattern.
+      Chunk const *paren_close_to_check = Chunk::NullChunkPtr;
+
+      if (before_paren->Is(E_Token::CT_PAREN_CLOSE))
+      {
+         paren_close_to_check = before_paren;
+      }
+      else
+      {
+         // Walk backward to find E_Token::CT_PAREN_CLOSE
+         // before_paren is BYREF, BOOL or ANGLE_CLOSE
+         // This could be part of: Type&& (Class::*)(...)
+         // Walk back to find (Class::*)
+         for (Chunk *check = before_paren; check->IsNotNullChunk(); check = check->GetPrevNcNnlNi())
+         {
+            if (check->Is(E_Token::CT_PAREN_CLOSE))
+            {
+               paren_close_to_check = check;
+               break;
+            }
+
+            if (  check->Is(E_Token::CT_SEMICOLON)
+               || check->Is(E_Token::CT_BRACE_OPEN)
+               || check->Is(E_Token::CT_BRACE_CLOSE)
+               || check->Is(E_Token::CT_ASSIGN))
+            {
+               break;
+            }
+         }
+      }
+      // Now check the found paren_close for pointer pattern (if any)
+      Chunk const *inner_open = paren_close_to_check->GetOpeningParen();
+
+      if (inner_open->IsNotNullChunk())
+      {
+         // Look inside for * (pointer) or ::* (member pointer)
+         for (Chunk const *inner = inner_open->GetNext(); inner != paren_close_to_check && inner->IsNotNullChunk(); inner = inner->GetNext())
+         {
+            if (  inner->Is(E_Token::CT_STAR)
+               || inner->Is(E_Token::CT_PTR_TYPE)
+               || inner->Is(E_Token::CT_DEREF))
+            {
+               LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu - && is rvalue ref in function pointer param\n",
+                       __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+               pc->SetType(E_Token::CT_BYREF);
+               return(true);
+            }
+         }
+      }
+   }
+   return(false);
+} // handle_rvalue_func_ptr_params
+
+
+void do_symbol_check(Chunk *prev, Chunk *pc, Chunk *next)
+{
+   LOG_FUNC_ENTRY();
+
+   LOG_FMT(LFCNR, "%s(%d): prev is '%s' %s\n",
+           __func__, __LINE__,
+           prev->GetLogText(), get_token_name(prev->GetType()));
+   log_pcf_flags(LFCNR, prev->GetFlags());
+   LOG_FMT(LFCNR, "%s(%d): pc is '%s' %s\n",
+           __func__, __LINE__,
+           pc->GetLogText(), get_token_name(pc->GetType()));
+   log_pcf_flags(LFCNR, pc->GetFlags());
+   LOG_FMT(LFCNR, "%s(%d): next is '%s' %s\n",
+           __func__, __LINE__,
+           next->GetLogText(), get_token_name(next->GetType()));
+   log_pcf_flags(LFCNR, next->GetFlags());
+
+   if (  pc->Is(E_Token::CT_NOEXCEPT)                 // Issue #3284
+      && next->Is(E_Token::CT_ASSIGN))                // skip over noexcept
+   {
+      LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu, text '%s'\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText());
+      pc   = next;
+      next = pc->GetNext();
+   }
+
+   // separate the uses of E_Token::CT_ASSIGN sign '='
+   // into E_Token::CT_ASSIGN_DEFAULT_ARG, E_Token::CT_ASSIGN_FUNC_PROTO
+   if (  pc->Is(E_Token::CT_ASSIGN)
+      && pc->GetParentType() == E_Token::CT_FUNC_PROTO
+      && (  pc->TestFlags(PCF_IN_FCN_DEF)                            // Issue #2236
+         || pc->TestFlags(PCF_IN_CONST_ARGS)))
+   {
+      LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu, text '%s'\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText());
+      log_pcf_flags(LFCNR, pc->GetFlags());
+      pc->SetType(E_Token::CT_ASSIGN_DEFAULT_ARG);
+      return;
+   }
+
+   if (  (  prev->Is(E_Token::CT_FPAREN_CLOSE)
+         || (  (  prev->IsString("const")
+               || prev->IsString("override"))
+            && prev->GetPrev()->Is(E_Token::CT_FPAREN_CLOSE)))
+      && pc->Is(E_Token::CT_ASSIGN)
+      && (  next->Is(E_Token::CT_DEFAULT)
+         || next->Is(E_Token::CT_DELETE)
+         || next->IsString("0")))
+   {
+      pc->SetType(E_Token::CT_ASSIGN_FUNC_PROTO);
+      return;                  // cpp 30031
+   }
+
+   if (pc->Is(E_Token::CT_OC_AT))
+   {
+      if (  next->Is(E_Token::CT_PAREN_OPEN)
+         || next->Is(E_Token::CT_BRACE_OPEN)
+         || next->Is(E_Token::CT_SQUARE_OPEN))
+      {
+         flag_parens(next, PCF_OC_BOXED, next->GetType(), E_Token::CT_OC_AT, false);
+      }
+      else
+      {
+         next->SetParentType(E_Token::CT_OC_AT);
+         return;                  // objective-c_50095
+      }
+   }
+
+   // D stuff
+   if (  language_is_set(lang_flag_e::LANG_D)
+      && pc->Is(E_Token::CT_QUALIFIER)
+      && pc->IsString("const")
+      && next->Is(E_Token::CT_PAREN_OPEN))
+   {
+      pc->SetType(E_Token::CT_D_CAST);
+      set_paren_parent(next, pc->GetType());
+      return;                  // d_40061
+   }
+
+   if (  next->Is(E_Token::CT_PAREN_OPEN)
+      && (  pc->Is(E_Token::CT_D_CAST)
+         || pc->Is(E_Token::CT_DELEGATE)
+         || pc->Is(E_Token::CT_ALIGN)))
+   {
+      // mark the parenthesis parent
+      Chunk *tmp = set_paren_parent(next, pc->GetType());
+
+      // For a D cast - convert the next item
+      if (  pc->Is(E_Token::CT_D_CAST)
+         && tmp->IsNotNullChunk())
+      {
+         if (tmp->Is(E_Token::CT_STAR))
+         {
+            tmp->SetType(E_Token::CT_DEREF);
+            return;                  // d_40006
+         }
+         else if (tmp->Is(E_Token::CT_AMP))
+         {
+            tmp->SetType(E_Token::CT_ADDR);
+            return;                  // d_40060
+         }
+         else if (tmp->Is(E_Token::CT_MINUS))
+         {
+            tmp->SetType(E_Token::CT_NEG);
+            return;                  // d_40060
+         }
+         else if (tmp->Is(E_Token::CT_PLUS))
+         {
+            tmp->SetType(E_Token::CT_POS);
+            return;                  // d_40060
+         }
+      }
+
+      /*
+       * For a delegate, mark previous words as types and the item after the
+       * close paren as a variable def
+       */
+      if (pc->Is(E_Token::CT_DELEGATE))
+      {
+         if (tmp->IsNotNullChunk())
+         {
+            tmp->SetParentType(E_Token::CT_DELEGATE);
+
+            if (tmp->GetLevel() == tmp->GetBraceLevel())
+            {
+               tmp->SetFlagBits(PCF_VAR_1ST_DEF);
+            }
+         }
+
+         for (tmp = pc->GetPrevNcNnlNi(); tmp->IsNotNullChunk(); tmp = tmp->GetPrevNcNnlNi()) // Issue #2279
+         {
+            if (  tmp->IsSemicolon()
+               || tmp->Is(E_Token::CT_BRACE_OPEN)
+               || tmp->Is(E_Token::CT_VBRACE_OPEN))
+            {
+               break;
+            }
+            make_type(tmp);
+         }
+
+         return;                  // c-sharp_10160
+      }
+
+      if (  pc->Is(E_Token::CT_ALIGN)
+         && tmp->IsNotNullChunk())
+      {
+         if (tmp->Is(E_Token::CT_BRACE_OPEN))
+         {
+            set_paren_parent(tmp, pc->GetType());
+            return;                  // d_40024
+         }
+         else if (tmp->Is(E_Token::CT_COLON))
+         {
+            tmp->SetParentType(pc->GetType());
+            return;                  // d_40024
+         }
+      }
+   } // paren open + cast/align/delegate
+
+   if (pc->Is(E_Token::CT_INVARIANT))
+   {
+      if (next->Is(E_Token::CT_PAREN_OPEN))
+      {
+         next->SetParentType(pc->GetType());
+         Chunk *tmp = next->GetNext();
+
+         while (tmp->IsNotNullChunk())
+         {
+            if (tmp->Is(E_Token::CT_PAREN_CLOSE))
+            {
+               tmp->SetParentType(pc->GetType());
+               break;
+            }
+            make_type(tmp);
+            tmp = tmp->GetNext();
+         }
+         return;                  // d_40100
+      }
+      else
+      {
+         pc->SetType(E_Token::CT_QUALIFIER);
+         return;
+      }
+   }
+
+   if (  prev->Is(E_Token::CT_BRACE_OPEN)
+      && prev->GetParentType() != E_Token::CT_CS_PROPERTY
+      && (  pc->Is(E_Token::CT_GETSET)
+         || pc->Is(E_Token::CT_GETSET_EMPTY)))
+   {
+      flag_parens(prev, PCF_NONE, E_Token::CT_NONE, E_Token::CT_GETSET, false);
+      return;
+   }
+
+   if (pc->Is(E_Token::CT_ASM))
+   {
+      flag_asm(pc);
+      return;
+   }
+
+   // clang stuff - A new derived type is introduced to C and, by extension, Objective-C, C++, and Objective-C++
+   if (  language_is_set(lang_flag_e::LANG_C)
+      || language_is_set(lang_flag_e::LANG_CPP)
+      || language_is_set(lang_flag_e::LANG_OC))
+   {
+      if (pc->Is(E_Token::CT_CARET))
+      {
+         if (  pc->TestFlags(PCF_EXPR_START)
+            || pc->TestFlags(PCF_IN_PREPROC))
+         {
+            handle_oc_block_literal(pc);
+            return;
+         }
+      }
+   }
+
+   // Objective C stuff
+   if (language_is_set(lang_flag_e::LANG_OC))
+   {
+      // Check for message declarations
+      if (pc->TestFlags(PCF_STMT_START))
+      {
+         if (  (  pc->IsString("-")
+               || pc->IsString("+"))
+            && next->IsString("("))
+         {
+            handle_oc_message_decl(pc);
+            return;
+         }
+      }
+
+      if (  pc->TestFlags(PCF_EXPR_START)
+         || pc->TestFlags(PCF_IN_PREPROC))
+      {
+         if (pc->Is(E_Token::CT_SQUARE_OPEN))
+         {
+            handle_oc_message_send(pc);
+
+            // Only return early if the '[' was determined to be an OC MSG
+            // Otherwise, it could have been a lambda capture list (ie '[&]')
+            if (pc->GetParentType() == E_Token::CT_OC_MSG)
+            {
+               return;  // objective-c_50003
+            }
+         }
+      }
+
+      if (pc->Is(E_Token::CT_OC_PROPERTY))
+      {
+         handle_oc_property_decl(pc);
+         return;
+      }
+
+      if (pc->Is(E_Token::CT_OC_AVAILABLE))
+      {
+         handle_oc_available(pc);
+         return;
+      }
+   }
+
+   // C# and Vala stuff
+   if (  language_is_set(lang_flag_e::LANG_CS)
+      || language_is_set(lang_flag_e::LANG_VALA))
+   {
+      // '[assembly: xxx]' stuff
+      if (  language_is_set(lang_flag_e::LANG_CS)
+         && pc->TestFlags(PCF_EXPR_START)
+         && pc->Is(E_Token::CT_SQUARE_OPEN))
+      {
+         handle_cs_square_stmt(pc);
+         return;
+      }
+
+      if (  language_is_set(lang_flag_e::LANG_CS)
+         && next->Is(E_Token::CT_BRACE_OPEN)
+         && next->GetParentType() == E_Token::CT_NONE
+         && (  pc->Is(E_Token::CT_SQUARE_CLOSE)
+            || pc->Is(E_Token::CT_ANGLE_CLOSE)
+            || pc->Is(E_Token::CT_WORD)))
+      {
+         handle_cs_property(next);
+         return;
+      }
+
+      if (  pc->Is(E_Token::CT_SQUARE_CLOSE)
+         && next->Is(E_Token::CT_WORD))
+      {
+         handle_cs_array_type(pc);
+         return;
+      }
+
+      if (  (  pc->Is(E_Token::CT_LAMBDA)
+            || pc->Is(E_Token::CT_DELEGATE))
+         && next->Is(E_Token::CT_BRACE_OPEN))
+      {
+         set_paren_parent(next, pc->GetType());
+         return;
+      }
+      // TODO: check the c-sharp language for the next 8 lines
+      //if (  language_is_set(lang_flag_e::LANG_CS)
+      //   && pc->Is(E_Token::CT_WHEN)
+      //   && pc->GetNext()->IsNotNullChunk()
+      //   && pc->GetNext()->IsNot(E_Token::CT_SPAREN_OPEN))
+      //{
+      //   pc->SetType(E_Token::CT_WORD);
+      //   return;
+      //}
+   }
+
+   if (  language_is_set(lang_flag_e::LANG_JAVA)
+      && pc->Is(E_Token::CT_LAMBDA)
+      && next->Is(E_Token::CT_BRACE_OPEN))
+   {
+      set_paren_parent(next, pc->GetType());
+      return;
+   }
+
+   if (pc->Is(E_Token::CT_NEW))
+   {
+      Chunk *ts  = Chunk::NullChunkPtr;
+      Chunk *tmp = next;
+
+      if (tmp->Is(E_Token::CT_TSQUARE))
+      {
+         ts  = tmp;
+         tmp = tmp->GetNextNcNnl();
+      }
+
+      if (  tmp->Is(E_Token::CT_BRACE_OPEN)
+         || tmp->Is(E_Token::CT_PAREN_OPEN))
+      {
+         set_paren_parent(tmp, pc->GetType());
+
+         if (ts->IsNotNullChunk())
+         {
+            ts->SetParentType(pc->GetType());
+         }
+      }
+      return;
+   }
+
+   // C++11 Lambda stuff
+   if (  language_is_set(lang_flag_e::LANG_CPP)
+      && (  pc->Is(E_Token::CT_SQUARE_OPEN)
+         || pc->Is(E_Token::CT_TSQUARE)))
+   {
+      handle_cpp_lambda(pc);
+   }
+
+   // FIXME: which language does this apply to?
+   // Issue #2432
+   if (!language_is_set(lang_flag_e::LANG_OC))
+   {
+      if (  pc->Is(E_Token::CT_ASSIGN)
+         && next->Is(E_Token::CT_SQUARE_OPEN))
+      {
+         set_paren_parent(next, E_Token::CT_ASSIGN);
+
+         // Mark one-liner assignment
+         Chunk *tmp = next;
+
+         while ((tmp = tmp->GetNextNc())->IsNotNullChunk())
+         {
+            if (tmp->IsNewline())
+            {
+               break;
+            }
+
+            if (  tmp->Is(E_Token::CT_SQUARE_CLOSE)
+               && next->GetLevel() == tmp->GetLevel())
+            {
+               tmp->SetFlagBits(PCF_ONE_LINER);
+               next->SetFlagBits(PCF_ONE_LINER);
+               break;
+            }
+         }
+         return;
+      }
+   }
+
+   if (pc->Is(E_Token::CT_ASSERT))
+   {
+      handle_java_assert(pc);
+      return;
+   }
+
+   if (pc->Is(E_Token::CT_ANNOTATION))
+   {
+      Chunk *tmp = pc->GetNextNcNnl();
+
+      if (tmp->IsParenOpen())
+      {
+         set_paren_parent(tmp, E_Token::CT_ANNOTATION);
+      }
+      return;
+   }
+
+   if (  pc->Is(E_Token::CT_SIZEOF)
+      && language_is_set(lang_flag_e::LANG_ALLC))
+   {
+      Chunk *tmp = pc->GetNextNcNnl();
+
+      if (tmp->Is(E_Token::CT_ELLIPSIS))
+      {
+         tmp->SetParentType(E_Token::CT_SIZEOF);
+      }
+      return;
+   }
+
+   if (  pc->Is(E_Token::CT_DECLTYPE)
+      && pc->GetParentType() != E_Token::CT_FUNC_DEF)
+   {
+      Chunk *tmp = pc->GetNextNcNnl();
+
+      if (tmp->IsParenOpen())
+      {
+         // decltype may be followed by a braced-init-list
+         tmp = set_paren_parent(tmp, E_Token::CT_DECLTYPE);
+
+         if (tmp->IsBraceOpen() && !pc->TestFlags(PCF_IN_LAMBDA))
+         {
+            tmp = set_paren_parent(tmp, E_Token::CT_BRACED_INIT_LIST);
+
+            if (tmp->IsNotNullChunk())
+            {
+               tmp->ResetFlagBits(PCF_EXPR_START | PCF_STMT_START);
+            }
+         }
+         else
+         {
+            if (tmp->Is(E_Token::CT_WORD))
+            {
+               tmp->SetFlagBits(PCF_VAR_1ST_DEF);
+            }
+         }
+      }
+      return;
+   }
+
+   if (pc->Is(E_Token::CT_NOEXCEPT))
+   {
+      Chunk *tmp = pc->GetNextNcNnl();
+
+      if (tmp->IsParenOpen())
+      {
+         set_paren_parent(tmp, E_Token::CT_NOEXCEPT);
+      }
+      return;
+   }
+
+   // A [] in C#, D and Vala only follows a type
+   if (  pc->Is(E_Token::CT_TSQUARE)
+      && (  language_is_set(lang_flag_e::LANG_D)
+         || language_is_set(lang_flag_e::LANG_CS)
+         || language_is_set(lang_flag_e::LANG_VALA)))
+   {
+      if (prev->Is(E_Token::CT_WORD))
+      {
+         prev->SetType(E_Token::CT_TYPE);
+      }
+
+      if (next->Is(E_Token::CT_WORD))
+      {
+         next->SetFlagBits(PCF_VAR_1ST_DEF);
+      }
+      return;
+   }
+
+   if (  pc->Is(E_Token::CT_SQL_EXEC)
+      || pc->Is(E_Token::CT_SQL_BEGIN)
+      || pc->Is(E_Token::CT_SQL_END))
+   {
+      mark_exec_sql(pc);
+      return;
+   }
+
+   if (pc->Is(E_Token::CT_PROTO_WRAP))
+   {
+      handle_proto_wrap(pc);
+      return;
+   }
+
+   // Handle the typedef
+   if (pc->Is(E_Token::CT_TYPEDEF))
+   {
+      fix_typedef(pc);
+      return;
+   }
+
+   if (  pc->IsClassEnumStructOrUnion()
+      && prev->IsNot(E_Token::CT_TYPEDEF))
+   {
+      // Issue #3811
+      // Sometimes the enum chunk can exist in a parameter (ie. `void foo(enum EnumType param)`)
+      // In this case we don't need to run the parser since we are not declaring an enum.
+      if (pc->IsEnum())
+      {
+         const size_t level = pc->GetLevel();
+         Chunk const  *tmp  = pc;
+
+         while (tmp->GetLevel() == level && tmp->IsNotNullChunk())
+         {
+            tmp = tmp->GetNextNcNnl();
+         }
+
+         if (tmp->GetLevel() < level)
+         {
+            return;
+         }
+      }
+      EnumStructUnionParser parser;
+      parser.parse(pc);
+      return;
+   }
+
+   if (pc->Is(E_Token::CT_EXTERN))
+   {
+      if (next->IsParenOpen())
+      {
+         Chunk *tmp = flag_parens(next, PCF_NONE, E_Token::CT_NONE, E_Token::CT_EXTERN, true);
+
+         if (tmp->Is(E_Token::CT_BRACE_OPEN))
+         {
+            set_paren_parent(tmp, E_Token::CT_EXTERN);
+         }
+      }
+      else
+      {
+         // next likely is a string (see tokenize_cleanup.cpp)
+         next->SetParentType(E_Token::CT_EXTERN);
+         Chunk *tmp = next->GetNextNcNnl();
+
+         if (tmp->Is(E_Token::CT_BRACE_OPEN))
+         {
+            set_paren_parent(tmp, E_Token::CT_EXTERN);
+         }
+      }
+      return;
+   }
+
+   if (pc->Is(E_Token::CT_TEMPLATE))
+   {
+      if (language_is_set(lang_flag_e::LANG_D))
+      {
+         handle_d_template(pc);
+      }
+      else
+      {
+         handle_cpp_template(pc);
+      }
+      return;
+   }
+
+   if (  pc->Is(E_Token::CT_WORD)
+      && next->Is(E_Token::CT_ANGLE_OPEN)
+      && next->GetParentType() == E_Token::CT_TEMPLATE)
+   {
+      mark_template_func(pc, next);
+      return;
+   }
+
+   if (  pc->Is(E_Token::CT_SQUARE_CLOSE)
+      && next->Is(E_Token::CT_PAREN_OPEN))
+   {
+      flag_parens(next, PCF_NONE, E_Token::CT_FPAREN_OPEN, E_Token::CT_NONE, false);
+      return;
+   }
+
+   if (pc->Is(E_Token::CT_TYPE_CAST))
+   {
+      fix_type_cast(pc);
+      return;
+   }
+
+   if (  pc->GetParentType() == E_Token::CT_ASSIGN
+      && (  pc->Is(E_Token::CT_BRACE_OPEN)
+         || pc->Is(E_Token::CT_SQUARE_OPEN)))
+   {
+      // Mark everything in here as in assign
+      flag_parens(pc, PCF_IN_ARRAY_ASSIGN, pc->GetType(), E_Token::CT_NONE, false);
+      return;
+   }
+
+   if (pc->Is(E_Token::CT_D_TEMPLATE))
+   {
+      set_paren_parent(next, pc->GetType());
+      return;
+   }
+
+   /*
+    * A word before an open paren is a function call or definition.
+    * E_Token::CT_WORD => E_Token::CT_FUNC_CALL or E_Token::CT_FUNC_DEF
+    */
+   if (next->Is(E_Token::CT_PAREN_OPEN))
+   {
+      Chunk *tmp = next->GetNextNcNnl();
+
+      if (  (  language_is_set(lang_flag_e::LANG_C)
+            || language_is_set(lang_flag_e::LANG_CPP)
+            || language_is_set(lang_flag_e::LANG_OC))
+         && tmp->Is(E_Token::CT_CARET))
+      {
+         handle_oc_block_type(tmp);
+
+         // This is the case where a block literal is passed as the first argument of a C-style method invocation.
+         if (  (  tmp->Is(E_Token::CT_OC_BLOCK_CARET)
+               || tmp->Is(E_Token::CT_CARET))
+            && pc->Is(E_Token::CT_WORD))
+         {
+            LOG_FMT(LFCN, "%s(%d): (1) SET TO E_Token::CT_FUNC_CALL: orig line is %zu, orig col is %zu, text '%s'\n",
+                    __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText());
+            pc->SetType(E_Token::CT_FUNC_CALL);
+         }
+      }
+      else if (  pc->Is(E_Token::CT_WORD)
+              || pc->Is(E_Token::CT_OPERATOR_VAL))
+      {
+         pc->SetType(E_Token::CT_FUNCTION);
+      }
+      else if (pc->Is(E_Token::CT_FIXED))
+      {
+         pc->SetType(E_Token::CT_FUNCTION);
+         pc->SetParentType(E_Token::CT_FIXED);
+      }
+      else if (pc->Is(E_Token::CT_TYPE))
+      {
+         /*
+          * If we are on a type, then we are either on a C++ style cast, an
+          * array reference, a function or we are on a function type.
+          * The only way to tell for sure is to find the close paren and see
+          * if it is followed by an open paren.
+          * "int(5.6)"
+          * "int()"
+          * "int(foo)(void)"
+          *
+          * FIXME: this check can be done better...
+          */
+         LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu, text '%s'\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText());
+
+         bool is_byref_array = false;
+
+         if (language_is_set(lang_flag_e::LANG_CPP))
+         {
+            // If the open paren is followed by an ampersand, an optional word,
+            // a close parenthesis, and an open square bracket, then it is an
+            // array being passed by reference, not a cast
+            tmp = next->GetNextNcNnl();
+
+            if (tmp->Is(E_Token::CT_AMP))
+            {
+               Chunk const *tmp2 = tmp->GetNextNcNnl();
+
+               if (tmp2->Is(E_Token::CT_WORD))
+               {
+                  tmp2 = tmp2->GetNextNcNnl();
+               }
+
+               if (tmp2->Is(E_Token::CT_PAREN_CLOSE))
+               {
+                  tmp2 = tmp2->GetNextNcNnl();
+
+                  if (tmp2->Is(E_Token::CT_SQUARE_OPEN))
+                  {
+                     is_byref_array = true;
+                     tmp->SetType(E_Token::CT_BYREF);
+                  }
+               }
+            }
+            // Handle rvalue reference array: (&&arr)[10]
+            else if (  tmp->Is(E_Token::CT_BOOL)
+                    && tmp->IsString("&&"))
+            {
+               Chunk const *tmp2 = tmp->GetNextNcNnl();
+
+               if (tmp2->Is(E_Token::CT_WORD))
+               {
+                  tmp2 = tmp2->GetNextNcNnl();
+               }
+
+               if (tmp2->Is(E_Token::CT_PAREN_CLOSE))
+               {
+                  tmp2 = tmp2->GetNextNcNnl();
+
+                  if (tmp2->Is(E_Token::CT_SQUARE_OPEN))
+                  {
+                     is_byref_array = true;
+                     tmp->SetType(E_Token::CT_BYREF);
+                  }
+               }
+            }
+         }
+
+         if (!is_byref_array)
+         {
+            tmp = next->GetNextType(E_Token::CT_PAREN_CLOSE, next->GetLevel());
+
+            if (tmp->IsNotNullChunk())
+            {
+               tmp = tmp->GetNext();
+
+               if (tmp->Is(E_Token::CT_PAREN_OPEN))
+               {
+                  pc->SetType(E_Token::CT_FUNCTION);
+               }
+               else
+               {
+                  if (  pc->GetParentType() == E_Token::CT_NONE
+                     && !pc->TestFlags(PCF_IN_TYPEDEF))
+                  {
+                     tmp = next->GetNextNcNnl();
+
+                     if (tmp->Is(E_Token::CT_PAREN_CLOSE))
+                     {
+                        // we have TYPE()
+                        pc->SetType(E_Token::CT_FUNCTION);
+                     }
+                     else
+                     {
+                        // we have TYPE(...)
+                        pc->SetType(E_Token::CT_CPP_CAST);
+                        set_paren_parent(next, E_Token::CT_CPP_CAST);
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+
+   if (language_is_set(lang_flag_e::LANG_PAWN))
+   {
+      if (  pc->Is(E_Token::CT_FUNCTION)
+         && pc->GetBraceLevel() > 0)
+      {
+         LOG_FMT(LFCN, "%s(%d): (2) SET TO E_Token::CT_FUNC_CALL: orig line is %zu, orig col is %zu, text '%s'\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText());
+         pc->SetType(E_Token::CT_FUNC_CALL);
+      }
+
+      if (  pc->Is(E_Token::CT_STATE)
+         && next->Is(E_Token::CT_PAREN_OPEN))
+      {
+         set_paren_parent(next, pc->GetType());
+      }
+   }
+   else
+   {
+      if (  (  pc->Is(E_Token::CT_FUNCTION)
+            || pc->Is(E_Token::CT_FUNC_DEF))
+         && (  (pc->GetParentType() == E_Token::CT_OC_BLOCK_EXPR)
+            || !is_oc_block(pc)))
+      {
+         mark_function(pc);
+      }
+   }
+
+   // Detect C99 member stuff
+   if (  pc->Is(E_Token::CT_MEMBER)
+      && (  prev->Is(E_Token::CT_COMMA)
+         || prev->Is(E_Token::CT_BRACE_OPEN)))
+   {
+      pc->SetType(E_Token::CT_C99_MEMBER);
+      next->SetParentType(E_Token::CT_C99_MEMBER);
+      return;
+   }
+
+   // Mark function parens and braces
+   if (  pc->Is(E_Token::CT_FUNC_DEF)
+      || pc->Is(E_Token::CT_FUNC_CALL)
+      || pc->Is(E_Token::CT_FUNC_CALL_USER)
+      || pc->Is(E_Token::CT_FUNC_PROTO))
+   {
+      Chunk *tmp = next;
+
+      if (tmp->Is(E_Token::CT_SQUARE_OPEN))
+      {
+         tmp = set_paren_parent(tmp, pc->GetType());
+      }
+      else if (  tmp->Is(E_Token::CT_TSQUARE)
+              || tmp->GetParentType() == E_Token::CT_OPERATOR)
+      {
+         tmp = tmp->GetNextNcNnl();
+      }
+
+      if (tmp->IsNotNullChunk())
+      {
+         if (tmp->IsParenOpen())
+         {
+            tmp = flag_parens(tmp, PCF_NONE, E_Token::CT_FPAREN_OPEN, pc->GetType(), false);
+
+            if (tmp->IsNotNullChunk())
+            {
+               if (tmp->Is(E_Token::CT_BRACE_OPEN))
+               {
+                  if (  tmp->GetParentType() != E_Token::CT_DOUBLE_BRACE
+                     && !pc->TestFlags(PCF_IN_CONST_ARGS))
+                  {
+                     set_paren_parent(tmp, pc->GetType());
+                  }
+               }
+               else if (  tmp->IsSemicolon()
+                       && pc->Is(E_Token::CT_FUNC_PROTO))
+               {
+                  tmp->SetParentType(pc->GetType());
+               }
+            }
+         }
+      }
+      return;
+   }
+
+   // Mark the parameters in catch()
+   if (  pc->Is(E_Token::CT_CATCH)
+      && next->Is(E_Token::CT_SPAREN_OPEN))
+   {
+      fix_fcn_def_params(next);
+      return;
+   }
+
+   if (  pc->Is(E_Token::CT_THROW)
+      && prev->Is(E_Token::CT_FPAREN_CLOSE))
+   {
+      pc->SetParentType(prev->GetParentType());
+
+      if (next->Is(E_Token::CT_PAREN_OPEN))
+      {
+         set_paren_parent(next, E_Token::CT_THROW);
+      }
+      return;
+   }
+
+   // Mark the braces in: "for_each_entry(xxx) { }"
+   if (  pc->Is(E_Token::CT_BRACE_OPEN)
+      && pc->GetParentType() != E_Token::CT_DOUBLE_BRACE
+      && prev->Is(E_Token::CT_FPAREN_CLOSE)
+      && (  prev->GetParentType() == E_Token::CT_FUNC_CALL
+         || prev->GetParentType() == E_Token::CT_FUNC_CALL_USER)
+      && !pc->TestFlags(PCF_IN_CONST_ARGS))
+   {
+      LOG_FMT(LFCN, "%s(%d): (3) SET TO E_Token::CT_FUNC_CALL: orig line is %zu, orig col is %zu, text '%s'\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText());
+      set_paren_parent(pc, E_Token::CT_FUNC_CALL);
+      return;
+   }
+
+   /*
+    * Check for a close parenthesis followed by an open parenthesis,
+    * which means that we are on a function type declaration (C/C++ only?).
+    * Note that typedefs are already taken care of.
+    */
+   if (  !pc->TestFlags(PCF_IN_TEMPLATE)                         // Issue #3252
+      && pc->GetParentType() != E_Token::CT_CPP_CAST
+      && pc->GetParentType() != E_Token::CT_C_CAST
+      && !pc->TestFlags(PCF_IN_PREPROC)
+      && !is_oc_block(pc)
+      && pc->GetParentType() != E_Token::CT_OC_MSG_DECL
+      && pc->GetParentType() != E_Token::CT_OC_MSG_SPEC
+      && pc->IsString(")")
+      && next->IsString("("))
+   {
+      if (language_is_set(lang_flag_e::LANG_D))
+      {
+         flag_parens(next, PCF_NONE, E_Token::CT_FPAREN_OPEN, E_Token::CT_FUNC_CALL, false);
+      }
+      else
+      {
+         mark_function_type(pc);
+      }
+      return;
+   }
+
+   if (pc->Is(E_Token::CT_OC_CLASS))
+   {
+      handle_oc_class(pc);
+      return;
+   }
+   // TODO: Check for stuff that can only occur at the start of an statement
+
+   if (!language_is_set(lang_flag_e::LANG_D))
+   {
+      /*
+       * Check a parenthesis pair to see if it is a cast.
+       * Note that SPAREN and FPAREN have already been marked.
+       */
+      if (  pc->Is(E_Token::CT_PAREN_OPEN)
+         && (  pc->GetParentType() == E_Token::CT_NONE
+            || pc->GetParentType() == E_Token::CT_OC_MSG
+            || pc->GetParentType() == E_Token::CT_OC_BLOCK_EXPR
+            || pc->GetParentType() == E_Token::CT_CS_SQ_STMT)           // Issue # 1256
+         && (  next->Is(E_Token::CT_WORD)
+            || next->Is(E_Token::CT_TYPE)
+            || next->Is(E_Token::CT_STRUCT)
+            || next->Is(E_Token::CT_QUALIFIER)
+            || next->Is(E_Token::CT_MEMBER)
+            || next->Is(E_Token::CT_DC_MEMBER)
+            || next->Is(E_Token::CT_ENUM)
+            || next->Is(E_Token::CT_UNION))
+         && prev->IsNot(E_Token::CT_DECLTYPE)
+         && prev->IsNot(E_Token::CT_SIZEOF)
+         && prev->GetParentType() != E_Token::CT_SIZEOF
+         && prev->GetParentType() != E_Token::CT_OPERATOR)
+      {
+         fix_casts(pc);
+         return;
+      }
+   }
+
+   if (language_is_set(lang_flag_e::LANG_CPP))
+   {
+      Chunk const *nnext = next->GetNextNcNnl();
+
+      // handle parent_type of assigns in special functions (ro5 + pure virtual)
+      if (  pc->GetFlags().test_any(PCF_IN_STRUCT | PCF_IN_CLASS)
+         && pc->Is(E_Token::CT_ASSIGN)
+         && nnext->Is(E_Token::CT_SEMICOLON)
+         && (  next->Is(E_Token::CT_DEFAULT)
+            || next->Is(E_Token::CT_DELETE)
+            || (  next->Is(E_Token::CT_NUMBER)
+               && next->IsString("0"))))
+      {
+         const size_t level        = pc->GetLevel();
+         bool         found_status = false;
+         Chunk const  *pprev       = pc->GetPrev();
+
+         for ( ; (  pprev->IsNotNullChunk()
+                 && pprev->GetLevel() >= level
+                 && pprev->IsNot(E_Token::CT_SEMICOLON)
+                 && pprev->IsNot(E_Token::CT_ACCESS_COLON))
+               ; pprev = pprev->GetPrev())
+         {
+            if (pprev->GetLevel() != level)
+            {
+               continue;
+            }
+
+            if (next->Is(E_Token::CT_NUMBER))
+            {
+               if (  pprev->Is(E_Token::CT_QUALIFIER)
+                  && pprev->IsString("virtual"))
+               {
+                  found_status = true;
+                  break;
+               }
+            }
+            else
+            {
+               if (  pprev->Is(E_Token::CT_FUNC_CLASS_PROTO)  // ctor/dtor
+                  || pprev->Is(E_Token::CT_FUNC_PROTO))       // normal function
+               {
+                  found_status = true;
+                  break;
+               }
+            }
+         }
+
+         if (found_status)
+         {
+            pc->SetParentType(pprev->GetType());
+         }
+      }
+
+      if (detect_cpp_braced_init_list(pc, next))
+      {
+         flag_cpp_braced_init_list(pc, next);
+      }
+   }
+
+   // Check for stuff that can only occur at the start of an expression
+   if (  pc->TestFlags(PCF_EXPR_START)
+      || (  prev->TestFlags(PCF_EXPR_START)
+         && pc->GetParentType() == E_Token::CT_OC_AT))
+   {
+      // Change STAR, MINUS, and PLUS in the easy cases
+      if (pc->Is(E_Token::CT_STAR))
+      {
+         // issue #596
+         // [0x100062020:IN_SPAREN,IN_FOR,STMT_START,EXPR_START,PUNCTUATOR]
+         // prev->GetType() is E_Token::CT_COLON ==> E_Token::CT_DEREF
+         if (prev->Is(E_Token::CT_ANGLE_CLOSE))
+         {
+            pc->SetType(E_Token::CT_PTR_TYPE);
+         }
+         else if (prev->Is(E_Token::CT_COLON))
+         {
+            pc->SetType(E_Token::CT_DEREF);
+         }
+         else
+         {
+            pc->SetType(E_Token::CT_DEREF);
+         }
+      }
+
+      if (  language_is_set(lang_flag_e::LANG_CPP)
+         && pc->Is(E_Token::CT_CARET)
+         && prev->Is(E_Token::CT_ANGLE_CLOSE))
+      {
+         pc->SetType(E_Token::CT_PTR_TYPE);
+      }
+
+      if (  (  language_is_set(lang_flag_e::LANG_CS)
+            || language_is_set(lang_flag_e::LANG_VALA))
+         && pc->Is(E_Token::CT_QUESTION)
+         && prev->Is(E_Token::CT_ANGLE_CLOSE))
+      {
+         pc->SetType(E_Token::CT_PTR_TYPE);
+      }
+
+      else if (pc->Is(E_Token::CT_MINUS))
+      {
+         pc->SetType(E_Token::CT_NEG);
+      }
+
+      else if (pc->Is(E_Token::CT_PLUS))
+      {
+         pc->SetType(E_Token::CT_POS);
+      }
+
+      else if (pc->Is(E_Token::CT_INCDEC_AFTER))
+      {
+         pc->SetType(E_Token::CT_INCDEC_BEFORE);
+      }
+
+      else if (pc->Is(E_Token::CT_AMP))
+      {
+         if (prev->Is(E_Token::CT_ANGLE_CLOSE))             // Issue #2324
+         {
+            pc->SetType(E_Token::CT_BYREF);
+         }
+         else
+         {
+            pc->SetType(E_Token::CT_ADDR);
+         }
+      }
+
+      else if (pc->Is(E_Token::CT_CARET))
+      {
+         if (  language_is_set(lang_flag_e::LANG_C)
+            || language_is_set(lang_flag_e::LANG_CPP)
+            || language_is_set(lang_flag_e::LANG_OC))
+         {
+            // This is likely the start of a block literal
+            handle_oc_block_literal(pc);
+         }
+      }
+   }
+
+   /*
+    * Change the parenthesis pair after a function/macro-function
+    * E_Token::CT_PAREN_OPEN => E_Token::CT_FPAREN_OPEN
+    */
+   if (pc->Is(E_Token::CT_MACRO_FUNC))
+   {
+      flag_parens(next, PCF_IN_FCN_CALL, E_Token::CT_FPAREN_OPEN, E_Token::CT_MACRO_FUNC, false);
+   }
+
+   if (  pc->Is(E_Token::CT_MACRO_OPEN)
+      || pc->Is(E_Token::CT_MACRO_ELSE)
+      || pc->Is(E_Token::CT_MACRO_CLOSE)
+      || pc->Is(E_Token::CT_MACRO_NO_INDENT)
+      || pc->Is(E_Token::CT_MACRO_NO_FMT_ARGS))
+   {
+      if (next->Is(E_Token::CT_PAREN_OPEN))
+      {
+         flag_parens(next, PCF_NONE, E_Token::CT_FPAREN_OPEN, pc->GetType(), false);
+      }
+   }
+
+   if (  pc->Is(E_Token::CT_DELETE)
+      && next->Is(E_Token::CT_TSQUARE))
+   {
+      next->SetParentType(E_Token::CT_DELETE);
+   }
+
+   // Change E_Token::CT_STAR to E_Token::CT_PTR_TYPE or E_Token::CT_ARITH or E_Token::CT_DEREF
+   if (  pc->Is(E_Token::CT_STAR)
+      || (  language_is_set(lang_flag_e::LANG_CPP)
+         && pc->Is(E_Token::CT_CARET)))
+   {
+      if (  next->IsParenClose()
+         || next->Is(E_Token::CT_COMMA))
+      {
+         pc->SetType(E_Token::CT_PTR_TYPE);
+      }
+      else if (  language_is_set(lang_flag_e::LANG_OC)
+              && next->Is(E_Token::CT_STAR))
+      {
+         /*
+          * Change pointer-to-pointer types in OC_MSG_DECLs
+          * from ARITH <===> DEREF to PTR_TYPE <===> PTR_TYPE
+          */
+         pc->SetType(E_Token::CT_PTR_TYPE);
+         pc->SetParentType(prev->GetParentType());
+
+         next->SetType(E_Token::CT_PTR_TYPE);
+         next->SetParentType(pc->GetParentType());
+      }
+      else if (  prev->Is(E_Token::CT_DECLTYPE)
+              || prev->Is(E_Token::CT_SIZEOF)
+              || prev->Is(E_Token::CT_DELETE)
+              || pc->GetParentType() == E_Token::CT_SIZEOF)
+      {
+         pc->SetType(E_Token::CT_DEREF);
+      }
+      else if (  (  prev->Is(E_Token::CT_WORD)
+                 && chunk_ends_type(prev)
+                 && !prev->TestFlags(PCF_IN_FCN_CTOR)
+                 && !prev->TestFlags(PCF_IN_ARRAY_ASSIGN)) // Issue #3345
+              || prev->Is(E_Token::CT_DC_MEMBER)
+              || prev->Is(E_Token::CT_PTR_TYPE))
+      {
+         if (next->Is(E_Token::CT_WORD))
+         {
+            Chunk *nn = next->GetNext();                // Issue #4184
+            LOG_FMT(LFCNR, "%s(%d): pc orig line is %zu, orig col is %zu, text is '%s', type is %s\n   ",
+                    __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText(), get_token_name(pc->GetType()));
+            log_pcf_flags(LFCNR, pc->GetFlags());
+            LOG_FMT(LFCNR, "%s(%d): nn orig line is %zu, orig col is %zu, text is '%s', type is %s\n   ",
+                    __func__, __LINE__, nn->GetOrigLine(), nn->GetOrigCol(), nn->GetLogText(), get_token_name(nn->GetType()));
+            log_pcf_flags(LFCNR, nn->GetFlags());
+
+            if (nn->Is(E_Token::CT_STAR))
+            {
+               // MATH_SQRT_2 * MATH_PI * MATH_PI
+               pc->SetType(E_Token::CT_ARITH);
+               nn->SetType(E_Token::CT_ARITH);
+            }
+            else
+            {
+               LOG_FMT(LFCNR, "%s(%d): pc orig line is %zu, orig col is %zu, text is '%s', type is %s\n   ",
+                       __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText(), get_token_name(pc->GetType()));
+               log_pcf_flags(LFCNR, pc->GetFlags());
+               pc->SetType(E_Token::CT_PTR_TYPE);
+            }
+         }
+         else
+         {
+            LOG_FMT(LFCNR, "%s(%d): pc orig line is %zu, orig col is %zu, text is '%s', type is %s\n   ",
+                    __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText(), get_token_name(pc->GetType()));
+            log_pcf_flags(LFCNR, pc->GetFlags());
+            pc->SetType(E_Token::CT_PTR_TYPE);
+         }
+      }
+      else if (  next->Is(E_Token::CT_SQUARE_OPEN)
+              && !language_is_set(lang_flag_e::LANG_OC))  // Issue #408
+      {
+         pc->SetType(E_Token::CT_PTR_TYPE);
+      }
+      else if (pc->Is(E_Token::CT_STAR))
+      {
+         // Add check for E_Token::CT_DC_MEMBER E_Token::CT_WORD E_Token::CT_STAR sequence
+         // to convert E_Token::CT_WORD into E_Token::CT_TYPE
+         // and E_Token::CT_STAR into E_Token::CT_PTR_TYPE
+         // look for an assign backward, function call, return to distinguish between
+         //    double result = Constants::PI * factor;
+         // and
+         //    ::some::name * foo;
+         if (  prev->Is(E_Token::CT_WORD)
+            && prev->GetPrev()->Is(E_Token::CT_DC_MEMBER)
+            && language_is_set(lang_flag_e::LANG_CPP))
+         {
+            // Issue 1402
+            bool  is_multiplication = false;
+            Chunk *tmp              = pc;
+
+            while (tmp->IsNotNullChunk())
+            {
+               if (  tmp->Is(E_Token::CT_SEMICOLON)
+                  || tmp->GetParentType() == E_Token::CT_CLASS)
+               {
+                  break;
+               }
+               else if (  tmp->Is(E_Token::CT_ASSIGN)
+                       || tmp->Is(E_Token::CT_FUNC_CALL)
+                       || tmp->Is(E_Token::CT_RETURN))
+               {
+                  is_multiplication = true;
+                  break;
+               }
+               tmp = tmp->GetPrevNcNnlNi(); // Issue #2279
+            }
+
+            if (is_multiplication)
+            {
+               // double result = Constants::PI * factor;
+               pc->SetType(E_Token::CT_ARITH);
+            }
+            else
+            {
+               //    ::some::name * foo;
+               prev->SetType(E_Token::CT_TYPE);
+               pc->SetType(E_Token::CT_PTR_TYPE);
+            }
+         }
+
+         /*
+          * A star can have three meanings
+          * 1. E_Token::CT_DEREF    = pointer dereferencing
+          * 2. E_Token::CT_PTR_TYPE = pointer definition
+          * 3. E_Token::CT_ARITH    = arithmetic multiplication
+          *
+          * most PCF_PUNCTUATOR chunks except a paren close would make this
+          * a deref. A paren close may end a cast or may be part of a macro fcn.
+          */
+         if (prev->Is(E_Token::CT_TYPE))
+         {
+            pc->SetType(E_Token::CT_PTR_TYPE);
+         }
+         else if (  pc->GetNext()->Is(E_Token::CT_SEMICOLON)      // Issue #2319
+                 || (  pc->GetNext()->Is(E_Token::CT_STAR)
+                    && pc->GetNext()->GetNext()->Is(E_Token::CT_SEMICOLON)))
+         {
+            // example:
+            //    using AbstractLinkPtr = AbstractLink*;
+            //    using AbstractLinkPtrPtr = AbstractLink**;
+            pc->SetType(E_Token::CT_PTR_TYPE);
+         }
+         else if (  (  pc->GetParentType() == E_Token::CT_FUNC_DEF
+                    && (  next->IsBraceOpen()
+                       || pc->GetNext()->IsStar()))
+                 || next->Is(E_Token::CT_QUALIFIER))               // Issue #2648
+         {
+            // example:
+            // auto getComponent(Color *color) -> Component * {
+            // auto getComponent(Color *color) -> Component ** {
+            // auto getComponent(Color *color) -> Component * _Nonnull
+            // only to help the vim command }}
+            pc->SetType(E_Token::CT_PTR_TYPE);
+         }
+         else if (  pc->GetNext()->Is(E_Token::CT_SEMICOLON)      // Issue #2319
+                 || (  pc->GetNext()->Is(E_Token::CT_STAR)
+                    && pc->GetNext()->GetNext()->Is(E_Token::CT_STAR)))
+         {
+            // more pointers are NOT yet possible
+            fprintf(stderr, "Too many pointers: the maximum level of pointer indirection is 3 (i.e., ***p)\n");
+            fprintf(stderr, "at line %zu, column %zu.\n", pc->GetOrigLine(), pc->GetOrigCol());
+            fprintf(stderr, "Please make a report.\n");
+            log_flush(true);
+            exit(EX_SOFTWARE);
+         }
+         else if (  !prev->TestFlags(PCF_PUNCTUATOR)
+                 || prev->Is(E_Token::CT_INCDEC_AFTER)
+                 || prev->Is(E_Token::CT_SQUARE_CLOSE)
+                 || prev->Is(E_Token::CT_DC_MEMBER)) // Issue #1402
+         {
+            if (prev->Is(E_Token::CT_SARITH))        // Issue #3120
+            {
+               pc->SetType(E_Token::CT_DEREF);
+            }
+            else
+            {
+               pc->SetType(E_Token::CT_ARITH);
+            }
+         }
+         else if (  !prev->IsParenClose()
+                 || prev->Is(E_Token::CT_SPAREN_CLOSE)
+                 || prev->GetParentType() == E_Token::CT_MACRO_FUNC)
+         {
+            pc->SetType(E_Token::CT_DEREF);
+         }
+         else
+         {
+            pc->SetType(E_Token::CT_ARITH);
+         }
+
+         if (pc->TestFlags(PCF_IN_TYPEDEF))  // Issue #1255/#633
+         {
+            Chunk const *tmp = pc;
+
+            while (tmp->IsNotNullChunk())
+            {
+               if (  tmp->Is(E_Token::CT_SEMICOLON)
+                  || tmp->Is(E_Token::CT_BRACE_OPEN)
+                  || tmp->Is(E_Token::CT_SQUARE_OPEN)) // Issue #3342
+               {
+                  break;
+               }
+               else if (tmp->Is(E_Token::CT_TYPEDEF))
+               {
+                  pc->SetType(E_Token::CT_PTR_TYPE);
+               }
+               tmp = tmp->GetPrevNcNnlNi(); // Issue #2279
+            }
+         }
+      }
+   }
+
+   if (pc->Is(E_Token::CT_AMP))
+   {
+      Chunk const *prevNext = prev->GetNext();
+
+      if (prev->Is(E_Token::CT_DELETE))
+      {
+         pc->SetType(E_Token::CT_ADDR);
+      }
+      else if (  prev->Is(E_Token::CT_TYPE)
+              || prev->Is(E_Token::CT_QUALIFIER)
+              || prevNext->Is(E_Token::CT_QUALIFIER))
+      {
+         pc->SetType(E_Token::CT_BYREF);
+      }
+      else if (  prev->Is(E_Token::CT_WORD)             // Issue #3204
+              && next->Is(E_Token::CT_OPERATOR))
+      {
+         pc->SetType(E_Token::CT_BYREF);
+      }
+      else if (  next->Is(E_Token::CT_FPAREN_CLOSE)
+              || next->Is(E_Token::CT_COMMA))
+      {
+         // fix the bug #654
+         // connect(&mapper, SIGNAL(mapped(QString &)), this, SLOT(onSomeEvent(QString &)));
+         pc->SetType(E_Token::CT_BYREF);
+      }
+      else if (pc->GetParentType() == E_Token::CT_USING_ALIAS)
+      {
+         // fix the Issue # 1689
+         // using reference = value_type &;
+         pc->GetPrev()->SetType(E_Token::CT_TYPE);
+         pc->SetType(E_Token::CT_BYREF);
+      }
+      else
+      {
+         // Issue # 1398
+         if (  pc->TestFlags(PCF_IN_FCN_DEF)
+            && prev->Is(E_Token::CT_WORD)
+            && pc->Is(E_Token::CT_AMP)
+            && next->Is(E_Token::CT_WORD))
+         {
+            /*
+             * Change E_Token::CT_WORD before E_Token::CT_AMP before E_Token::CT_WORD to E_Token::CT_TYPE
+             */
+            prev->SetType(E_Token::CT_TYPE);
+         }
+         else if (  pc->TestFlags(PCF_IN_PREPROC)        // Issue #3559
+                 && prev->IsNot(E_Token::CT_WORD)        // Issue #2205
+                 && prev->IsNot(E_Token::CT_PAREN_CLOSE) // Issue #4539
+                 && pc->Is(E_Token::CT_AMP)
+                 && next->Is(E_Token::CT_WORD)
+                 && !pc->TestFlags(PCF_IN_SPAREN))
+         {
+            pc->SetType(E_Token::CT_ADDR);
+         }
+         else
+         {
+            pc->SetType(E_Token::CT_ARITH);
+
+            if (  prev->Is(E_Token::CT_WORD)
+               && next->IsNot(E_Token::CT_NUMBER))           // Issue #3407
+            {
+               Chunk const *tmp = prev->GetPrevNcNnlNi(); // Issue #2279
+
+               if (tmp->IsNotNullChunk())
+               {
+                  if (  tmp->IsSemicolon()
+                     || tmp->Is(E_Token::CT_BRACE_OPEN)
+                     || tmp->Is(E_Token::CT_QUALIFIER))
+                  {
+                     pc->SetType(E_Token::CT_BYREF);
+                     prev->SetType(E_Token::CT_TYPE);
+
+                     if (!(  next->Is(E_Token::CT_OPERATOR)
+                          || next->Is(E_Token::CT_TYPE)
+                          || next->Is(E_Token::CT_DC_MEMBER)))
+                     {
+                        LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu, text '%s', set PCF_VAR_1ST\n",
+                                __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText());
+                        next->SetFlagBits(PCF_VAR_1ST);
+                     }
+                  }
+                  else if (tmp->Is(E_Token::CT_DC_MEMBER))
+                  {
+                     // see also Issue #3967
+                     // Issue #2103 & Issue #3865: partial fix
+                     // No easy way to tell between an enum and a type with
+                     // a namespace qualifier. Compromise: if we're in a
+                     // function def or call, assume it's a ref.
+                     Chunk const *nextNext = next->GetNext();
+
+                     if (  nextNext->IsNot(E_Token::CT_DC_MEMBER)
+                        && (  pc->TestFlags(PCF_IN_FCN_CALL)
+                           || pc->TestFlags(PCF_IN_FCN_CTOR)
+                           || pc->TestFlags(PCF_IN_FCN_DEF)))
+                     {
+                        pc->SetType(E_Token::CT_BYREF);
+                     }
+                     else
+                     {
+                        prev->SetType(E_Token::CT_TYPE);
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+
+   if (  pc->Is(E_Token::CT_MINUS)
+      || pc->Is(E_Token::CT_PLUS))
+   {
+      if (  prev->Is(E_Token::CT_POS)
+         || prev->Is(E_Token::CT_NEG)
+         || prev->Is(E_Token::CT_ARITH)
+         || prev->Is(E_Token::CT_SHIFT))
+      {
+         pc->SetType(pc->Is(E_Token::CT_MINUS) ? E_Token::CT_NEG : E_Token::CT_POS);
+      }
+      else if (prev->Is(E_Token::CT_OC_CLASS))
+      {
+         pc->SetType((pc->Is(E_Token::CT_MINUS)) ? E_Token::CT_NEG : E_Token::CT_POS);
+      }
+      else
+      {
+         pc->SetType(E_Token::CT_ARITH);
+      }
+   }
+
+   /*
+    * Bug # 634
+    * Check for extern "C" NSString* i;
+    * NSString is a type
+    * change E_Token::CT_WORD => E_Token::CT_TYPE     for pc
+    * change E_Token::CT_STAR => E_Token::CT_PTR_TYPE for pc-next
+    */
+   if (pc->Is(E_Token::CT_WORD))     // here NSString
+   {
+      Chunk       *pcNext = pc->GetNext();
+      Chunk const *pcPrev = pc->GetPrev();
+
+      if (pcNext->Is(E_Token::CT_STAR))                   // here *
+      {
+         // compare text with "C" to find extern "C" instructions
+         if (pcPrev->Is(E_Token::CT_STRING))
+         {
+            if (UncText::compare(pcPrev->GetLogText(), "\"C\"") == 0)
+            {
+               if (pcPrev->GetPrev()->Is(E_Token::CT_EXTERN))
+               {
+                  pc->SetType(E_Token::CT_TYPE);                                                // change E_Token::CT_WORD => E_Token::CT_TYPE
+                  pcNext->SetType(E_Token::CT_PTR_TYPE);                                        // change E_Token::CT_STAR => E_Token::CT_PTR_TYPE
+               }
+            }
+         }
+         // Issue #322 STDMETHOD(GetValues)(BSTR bsName, REFDATA** pData);
+         Chunk *nnext = pcNext->GetNext();
+
+         if (  nnext->Is(E_Token::CT_STAR)
+            && pc->TestFlags(PCF_IN_CONST_ARGS))
+         {
+            // change E_Token::CT_STAR => E_Token::CT_PTR_TYPE
+            pcNext->SetType(E_Token::CT_PTR_TYPE);
+            nnext->SetType(E_Token::CT_PTR_TYPE);
+         }
+
+         // Issue #222 whatever3 *(func_ptr)( whatever4 *foo2, ...
+         if (  nnext->Is(E_Token::CT_WORD)
+            && pc->TestFlags(PCF_IN_FCN_DEF))
+         {
+            // look for the opening parenthesis
+            // Issue 1403
+            Chunk const *tmp = pc->GetPrevType(E_Token::CT_FPAREN_OPEN, pc->GetLevel() - 1);
+
+            if (  tmp->IsNotNullChunk()
+               && tmp->GetParentType() != E_Token::CT_FUNC_CTOR_VAR)
+            {
+               pcNext->SetType(E_Token::CT_PTR_TYPE);
+            }
+         }
+      }
+   }
+
+   /*
+    * Bug # 634
+    * Check for __attribute__((visibility ("default"))) NSString* i;
+    * NSString is a type
+    * change E_Token::CT_WORD => E_Token::CT_TYPE     for pc
+    * change E_Token::CT_STAR => E_Token::CT_PTR_TYPE for pc-next
+    */
+   if (pc->Is(E_Token::CT_WORD))     // here NSString
+   {
+      Chunk *pcNext = pc->GetNext();
+
+      if (pcNext->Is(E_Token::CT_STAR))                   // here *
+      {
+         Chunk const *tmp = pc;
+
+         while (tmp->IsNotNullChunk())
+         {
+            if (tmp->Is(E_Token::CT_ATTRIBUTE))
+            {
+               LOG_FMT(LFCNR, "%s(%d): ATTRIBUTE found, type is %s, text '%s'\n",
+                       __func__, __LINE__, get_token_name(tmp->GetType()), tmp->GetLogText());
+               LOG_FMT(LFCNR, "for token, type is %s, text '%s'\n", get_token_name(pc->GetType()), pc->GetLogText());
+               // change E_Token::CT_WORD => E_Token::CT_TYPE
+               pc->SetType(E_Token::CT_TYPE);
+               // change E_Token::CT_STAR => E_Token::CT_PTR_TYPE
+               pcNext->SetType(E_Token::CT_PTR_TYPE);
+            }
+
+            if (tmp->TestFlags(PCF_STMT_START))
+            {
+               // we are at beginning of the line
+               break;
+            }
+            tmp = tmp->GetPrev();
+         }
+      }
+   }
+
+   /*
+    * Issue # 1689
+    * Check for using reference = value_type&;
+    * is it a Type alias, alias template?
+    */
+   if (pc->Is(E_Token::CT_USING))
+   {
+      // look for E_Token::CT_ASSIGN before E_Token::CT_SEMICOLON at the end of the statement
+
+      bool       is_preproc    = pc->TestFlags(PCF_IN_PREPROC);
+      auto const search_assign = [&pc, &is_preproc]()
+      {
+         for (Chunk const *temp = pc; temp->IsNotNullChunk(); temp = temp->GetNextNcNnl())
+         {
+            LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu, text '%s', type is %s\n",
+                    __func__, __LINE__, temp->GetOrigLine(), temp->GetOrigCol(),
+                    temp->GetLogText(), get_token_name(temp->GetType()));
+
+            if (temp->Is(E_Token::CT_ASSIGN))
+            {
+               return(true);
+            }
+
+            if (  temp->Is(E_Token::CT_SEMICOLON)
+               || (  is_preproc
+                  && (  !temp->TestFlags(PCF_IN_PREPROC)
+                     || temp->Is(E_Token::CT_PREPROC))))
+            {
+               return(false);
+            }
+         }
+
+         return(false);
+      };
+
+      const bool assign_found = language_is_set(lang_flag_e::LANG_D) || search_assign();
+
+      if (assign_found)
+      {
+         // it is a Type alias, alias template
+         for (Chunk *temp = pc; temp->IsNotNullChunk(); temp = temp->GetNextNcNnl())
+         {
+            if (temp->GetParentType() == E_Token::CT_NONE)
+            {
+               temp->SetParentType(E_Token::CT_USING_ALIAS);
+            }
+
+            if (  temp->Is(E_Token::CT_SEMICOLON)
+               || (  is_preproc
+                  && (  !temp->TestFlags(PCF_IN_PREPROC)
+                     || temp->Is(E_Token::CT_PREPROC))))
+            {
+               break;
+            }
+         }
+      }
+   }
+
+   // Handle && as rvalue reference using refactored helper functions
+   if (  language_is_set(lang_flag_e::LANG_CPP)
+      && pc->Is(E_Token::CT_BOOL)
+      && pc->IsString("&&"))
+   {
+      handle_fold_expression(prev, pc, next)
+      || handle_bool_inside_expression_context(prev, pc, next)
+      || handle_ternary_bool_context(prev, pc, next)
+      || handle_rvalue_conversion_operator(prev, pc, next)
+      || handle_rvalue_func_ptr_params(prev, pc, next)
+      || handle_rvalue_using_alias(prev, pc, next)
+      || handle_rvalue_angle_close(prev, pc)
+      || handle_rvalue_variadic(prev, pc, next)
+      || handle_rvalue_in_template(prev, pc, next)
+      || handle_rvalue_function_decl(prev, pc, next)
+      || handle_rvalue_operator_decl(prev, pc, next)
+      || handle_rvalue_namespace_qualified(prev, pc, next)
+      || handle_rvalue_decltype(prev, pc, next)
+      || handle_rvalue_trailing_return(prev, pc, next)
+      || handle_rvalue_forwarding_ref(prev, pc, next)
+      || handle_rvalue_in_sparen(prev, pc, next)
+      || handle_rvalue_after_type(prev, pc);
+   }
+
+   // C++ function reference qualifiers: detect && and & after function parameter lists
+   if (  language_is_set(lang_flag_e::LANG_CPP)
+      && (  (  pc->Is(E_Token::CT_BOOL)
+            && pc->IsString("&&"))
+         || (  pc->Is(E_Token::CT_AMP)
+            && pc->IsString("&"))
+         || (  pc->Is(E_Token::CT_BYREF)   // Handle already classified single &
+            && pc->IsString("&"))
+         || (  pc->Is(E_Token::CT_ARITH)   // Handle already classified single &
+            && pc->IsString("&")))
+      && is_function_ref_qualifier_context(pc))
+   {
+      LOG_FMT(LFCNR, "%s(%d): setting function reference qualifier at orig line %zu, orig col %zu, Text() '%s'\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText());
+      pc->SetType(E_Token::CT_REF_QUALIFIER);
+      return;
+   }
+
+   // Issue #1704
+   if (  pc->Is(E_Token::CT_INCDEC_AFTER)
+      && pc->TestFlags(PCF_IN_PREPROC))
+   {
+      Chunk const *tmp_2 = pc->GetNext();
+      LOG_FMT(LFCNR, "%s(%d): orig line is %zu, orig col is %zu, text '%s', type is %s\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(),
+              pc->GetLogText(), get_token_name(pc->GetType()));
+      log_pcf_flags(LFTYPE, pc->GetFlags());
+
+      if (tmp_2->Is(E_Token::CT_WORD))
+      {
+         pc->SetType(E_Token::CT_INCDEC_BEFORE);
+      }
+   }
+} // do_symbol_check
+
+
+void fix_symbols()
+{
+   LOG_FUNC_ENTRY();
+   Chunk *pc;
+
+   cpd.unc_stage = unc_stage_e::FIX_SYMBOLS;
+
+   mark_define_expressions();
+
+   bool is_cpp  = language_is_set(lang_flag_e::LANG_CPP);
+   bool is_java = language_is_set(lang_flag_e::LANG_JAVA);
+
+   for (pc = Chunk::GetHead(); pc->IsNotNullChunk(); pc = pc->GetNextNcNnl())
+   {
+      LOG_FMT(LFCNR, "%s(%d): pc orig line is %zu, orig col is %zu, text is '%s', type is %s\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText(), get_token_name(pc->GetType()));
+
+      if (  pc->Is(E_Token::CT_FUNC_WRAP)
+         || pc->Is(E_Token::CT_TYPE_WRAP))
+      {
+         handle_wrap(pc);
+      }
+
+      if (pc->Is(E_Token::CT_ASSIGN))
+      {
+         mark_lvalue(pc);
+      }
+      // a brace immediately preceded by word in C++11 is an initializer list though it may also
+      // by a type casting initializer list if the word is really a type; sadly uncrustify knows
+      // only built-in types and knows nothing of user-defined types
+      Chunk const *prev = pc->GetPrevNcNnlNi();   // Issue #2279
+
+      if (  is_cpp
+         && pc->Is(E_Token::CT_BRACE_OPEN)
+         && (  prev->Is(E_Token::CT_WORD)
+            || prev->Is(E_Token::CT_TYPE)))
+      {
+         mark_lvalue(pc);
+      }
+
+      if (  is_java
+         && pc->Is(E_Token::CT_BRACE_OPEN))
+      {
+         check_double_brace_init(pc);
+      }
+
+      if (pc->Is(E_Token::CT_ATTRIBUTE))
+      {
+         Chunk *next = pc->GetNextNcNnl(E_Scope::PREPROC);
+
+         if (  next->IsNotNullChunk()
+            && next->Is(E_Token::CT_PAREN_OPEN))
+         {
+            flag_parens(next, PCF_NONE, E_Token::CT_FPAREN_OPEN, E_Token::CT_ATTRIBUTE, false);
+         }
+      }
+   }
+
+   pc = Chunk::GetHead();
+
+   if (pc->IsCommentOrNewline())
+   {
+      pc = pc->GetNextNcNnl();
+   }
+
+   while (pc->IsNotNullChunk())
+   {
+      if (pc->Is(E_Token::CT_IGNORED))
+      {
+         pc = pc->GetNextNcNnl();
+         continue;
+      }
+      LOG_FMT(LFCNR, "%s(%d): pc orig line %zu, orig col %zu, text '%s', type %s\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText(), get_token_name(pc->GetType()));
+      Chunk *prev = pc->GetPrevNcNnlNi(E_Scope::PREPROC);   // Issue #2279
+
+      if (prev->Is(E_Token::CT_QUALIFIER))
+      {
+         prev = prev->GetPrevNcNnlNi(E_Scope::PREPROC);     // Issue #3513
+      }
+
+      if (prev->IsNullChunk())
+      {
+         LOG_FMT(LFCNR, "%s(%d): prev is NOT defined\n", __func__, __LINE__);
+      }
+      else
+      {
+         // Issue #2279
+         LOG_FMT(LFCNR, "%s(%d): prev(ni) orig line %zu, orig col %zu, text '%s', type %s\n",
+                 __func__, __LINE__, prev->GetOrigLine(), prev->GetOrigCol(), prev->GetLogText(), get_token_name(prev->GetType()));
+      }
+      Chunk *next = pc->GetNextNcNnl(E_Scope::PREPROC);
+
+      if (next->IsNullChunk())
+      {
+         LOG_FMT(LFCNR, "%s(%d): next is NOT defined\n", __func__, __LINE__);
+      }
+      else
+      {
+         // Issue #2279
+         LOG_FMT(LFCNR, "%s(%d): next orig line %zu, orig col %zu, text '%s', type %s\n",
+                 __func__, __LINE__, next->GetOrigLine(), next->GetOrigCol(), next->GetLogText(), get_token_name(next->GetType()));
+      }
+      LOG_FMT(LFCNR, "%s(%d): do_symbol_check for '%s, %s, %s'\n",
+              __func__, __LINE__, prev->GetLogText(), pc->GetLogText(), next->GetLogText());
+      do_symbol_check(prev, pc, next);
+      pc = pc->GetNextNcNnl();
+   }
+   pawn_add_virtual_semicolons();
+   process_returns_and_throws();
+
+   /*
+    * 2nd pass - handle variable definitions
+    * REVISIT: We need function params marked to do this (?)
+    */
+   pc = Chunk::GetHead();
+   int square_level = -1;
+
+   while (pc->IsNotNullChunk())
+   {
+      char copy[1000];
+      LOG_FMT(LFCNR, "%s(%d): pc orig line is %zu, orig col is %zu, text is '%s', type is %s, parent type is %s\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->ElidedText(copy), get_token_name(pc->GetType()), get_token_name(pc->GetParentType()));
+
+      // Can't have a variable definition inside [ ]
+      if (square_level < 0)
+      {
+         if (pc->Is(E_Token::CT_SQUARE_OPEN))
+         {
+            square_level = pc->GetLevel();
+         }
+      }
+      else
+      {
+         if (pc->GetLevel() <= static_cast<size_t>(square_level))
+         {
+            square_level = -1;
+         }
+      }
+
+      if (  pc->Is(E_Token::CT_EXTERN)
+         && language_is_set(lang_flag_e::LANG_ALLC))
+      {
+         Chunk const *next = pc->GetNextNcNnl();
+
+         if (next->Is(E_Token::CT_STRING))
+         {
+            Chunk *tmp = next->GetNextNcNnl();
+
+            while (tmp->IsNotNullChunk())
+            {
+               if (  tmp->Is(E_Token::CT_TYPE)
+                  || tmp->Is(E_Token::CT_BRACE_OPEN)
+                  || tmp->Is(E_Token::CT_ATTRIBUTE))
+               {
+                  break;
+               }
+
+               if (tmp->Is(E_Token::CT_WORD))
+               {
+                  tmp->SetFlagBits(PCF_STMT_START | PCF_EXPR_START);
+                  log_ruleStart("start statement/ expression", tmp);
+                  break;
+               }
+               tmp = tmp->GetNextNcNnl();
+            }
+         }
+      }
+
+      if (  pc->Is(E_Token::CT_ATTRIBUTE)
+         && language_is_set(lang_flag_e::LANG_ALLC))
+      {
+         Chunk *tmp = skip_attribute_next(pc);
+
+         if (tmp->Is(E_Token::CT_WORD))
+         {
+            tmp->SetFlagBits(PCF_STMT_START | PCF_EXPR_START);
+            log_ruleStart("start statement/ expression", tmp);
+         }
+      }
+
+      if (  pc->Is(E_Token::CT_BRACE_OPEN)                       // Issue #2332
+         && pc->GetParentType() == E_Token::CT_BRACED_INIT_LIST)
+      {
+         LOG_FMT(LFCNR, "%s(%d): pc orig line is %zu, orig col is %zu, text is '%s', look for E_Token::CT_BRACE_OPEN\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText());
+         pc = pc->GetNextType(E_Token::CT_BRACE_CLOSE, pc->GetLevel());
+      }
+      /*
+       * A variable definition is possible after at the start of a statement
+       * that starts with: DC_MEMBER, QUALIFIER, TYPE, or WORD
+       */
+      // Issue #2279
+      // Issue #2478
+      LOG_FMT(LFCNR, "%s(%d): pc orig line is %zu, orig col is %zu, text is '%s', type is %s, parent type is %s\n   ",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->ElidedText(copy), get_token_name(pc->GetType()), get_token_name(pc->GetParentType()));
+      log_pcf_flags(LFCNR, pc->GetFlags());
+
+      if (  (square_level < 0)
+         && pc->TestFlags(PCF_STMT_START)
+         && (  pc->Is(E_Token::CT_QUALIFIER)
+            || pc->Is(E_Token::CT_TYPE)
+            || pc->Is(E_Token::CT_TYPENAME)
+            || pc->Is(E_Token::CT_DC_MEMBER)          // Issue #2478
+            || (  pc->Is(E_Token::CT_WORD)
+               && !pc->TestFlags(PCF_IN_CONDITIONAL)  // Issue #3558
+//               && language_is_set(lang_flag_e::LANG_CPP)
+                  )
+               )
+         && pc->GetParentType() != E_Token::CT_BIT_COLON
+         && pc->GetParentType() != E_Token::CT_ENUM_COLON      // Issue #4040
+         && pc->GetParentType() != E_Token::CT_ENUM
+         && !pc->TestFlags(PCF_IN_CLASS_BASE)
+         && !pc->TestFlags(PCF_IN_ENUM))
+      {
+         pc = fix_variable_definition(pc);
+      }
+      else
+      {
+         pc = pc->GetNextNcNnl();
+      }
+   }
+} // fix_symbols
+
+
+static void process_returns_and_throws()
+{
+   LOG_FUNC_ENTRY();
+   Chunk *pc;
+
+   pc = Chunk::GetHead();
+
+   while (pc->IsNotNullChunk())
+   {
+      if (  pc->Is(E_Token::CT_RETURN)
+         || pc->Is(E_Token::CT_THROW))
+      {
+         pc = process_return_or_throw(pc);
+      }
+      else
+      {
+         pc = pc->GetNext();
+      }
+   }
+}
+
+
+static Chunk *process_return_or_throw(Chunk *pc)
+{
+   LOG_FUNC_ENTRY();
+
+   const char *nl_expr_name;
+   iarf_e     nl_expr_value;
+   const char *mod_paren_name;
+   iarf_e     mod_paren_value;
+
+   if (pc->Is(E_Token::CT_RETURN))
+   {
+      nl_expr_name    = "nl_return_expr";
+      nl_expr_value   = options::nl_return_expr();
+      mod_paren_name  = "mod_paren_on_return";
+      mod_paren_value = options::mod_paren_on_return();
+   }
+   else if (pc->Is(E_Token::CT_THROW))
+   {
+      nl_expr_name    = "nl_throw_expr";
+      nl_expr_value   = options::nl_throw_expr();
+      mod_paren_name  = "mod_paren_on_throw";
+      mod_paren_value = options::mod_paren_on_throw();
+   }
+   else // should never happen
+   {
+      return(pc->GetNext());
+   }
+   Chunk *next;
+   Chunk *temp;
+   Chunk *semi;
+   Chunk *cpar;
+   Chunk chunk;
+
+   // grab next and bail if it is a semicolon
+   next = pc->PpaGetNextNcNnl();
+
+   if (  next->IsNullChunk()
+      || next->IsSemicolon()
+      || next->Is(E_Token::CT_NEWLINE))
+   {
+      return(next);
+   }
+   log_rule_B(nl_expr_name);
+
+   if (  nl_expr_value != IARF_IGNORE
+      && !pc->TestFlags(PCF_IN_PREPROC))
+   {
+      newline_iarf(pc, nl_expr_value);
+   }
+
+   if (next->Is(E_Token::CT_PAREN_OPEN))
+   {
+      // See if the return/throw is fully paren'd
+      cpar = next->GetNextType(E_Token::CT_PAREN_CLOSE, next->GetLevel());
+
+      if (cpar->IsNullChunk())
+      {
+         return(Chunk::NullChunkPtr);
+      }
+      semi = cpar->PpaGetNextNcNnl();
+
+      if (semi->IsNullChunk())
+      {
+         return(Chunk::NullChunkPtr);
+      }
+
+      if (  semi->Is(E_Token::CT_NEWLINE)
+         || semi->IsSemicolon())
+      {
+         log_rule_B(mod_paren_name);
+
+         if (mod_paren_value == IARF_REMOVE)
+         {
+            LOG_FMT(LRETURN, "%s(%d): removing parens on orig line %zu\n",
+                    __func__, __LINE__, pc->GetOrigLine());
+
+            // lower the level of everything
+            for (temp = next; temp != cpar; temp = temp->GetNext())
+            {
+               if (temp->GetLevel() == 0)
+               {
+                  fprintf(stderr, "%s(%d): temp->GetLevel() is ZERO, cannot be decremented, at line %zu, column %zu\n",
+                          __func__, __LINE__, temp->GetOrigLine(), temp->GetOrigCol());
+                  log_flush(true);
+                  exit(EX_SOFTWARE);
+               }
+               temp->SetLevel(temp->GetLevel() - 1);
+            }
+
+            // delete the parenthesis
+            Chunk::Delete(next);
+            Chunk::Delete(cpar);
+
+            // back up following chunks
+            temp = semi;
+
+            while (  temp->IsNotNullChunk()
+                  && temp->IsNot(E_Token::CT_NEWLINE))
+            {
+               temp->SetColumn(temp->GetColumn() - 2);
+               temp->SetOrigCol(temp->GetOrigCol() - 2);
+               temp->SetOrigColEnd(temp->GetOrigColEnd() - 2);
+               temp = temp->GetNext();
+            }
+         }
+         else
+         {
+            LOG_FMT(LRETURN, "%s(%d): keeping parens on orig line %zu\n",
+                    __func__, __LINE__, pc->GetOrigLine());
+
+            // mark & keep them
+            next->SetParentType(pc->GetType());
+            cpar->SetParentType(pc->GetType());
+         }
+         return(semi);
+      }
+   }
+   // We don't have a fully paren'd return/throw. Should we add some?
+   log_rule_B(mod_paren_name);
+
+   if (!(mod_paren_value & IARF_ADD))
+   {
+      return(next);
+   }
+
+   // Issue #1917
+   // Never add parens to a braced init list; that breaks the code
+   //   return {args...};    // C++11 type elision; okay
+   //   return ({args...});  // ill-formed
+   if (  language_is_set(lang_flag_e::LANG_CPP)
+      && next->Is(E_Token::CT_BRACE_OPEN)
+      && next->GetParentType() == E_Token::CT_BRACED_INIT_LIST)
+   {
+      LOG_FMT(LRETURN, "%s(%d): not adding parens around braced initializer"
+              " on orig line %zd\n",
+              __func__, __LINE__, pc->GetOrigLine());
+      return(next);
+   }
+   // find the next semicolon on the same level
+   semi = next;
+
+   if (pc->TestFlags(PCF_IN_PREPROC))
+   {
+      while ((semi = semi->GetNext())->IsNotNullChunk())
+      {
+         if (!semi->TestFlags(PCF_IN_PREPROC))
+         {
+            break;
+         }
+
+         if (semi->GetLevel() < pc->GetLevel())
+         {
+            return(semi);
+         }
+
+         if (  semi->IsSemicolon()
+            && pc->GetLevel() == semi->GetLevel())
+         {
+            break;
+         }
+      }
+   }
+   else
+   {
+      while ((semi = semi->GetNext())->IsNotNullChunk())
+      {
+         if (semi->GetLevel() < pc->GetLevel())
+         {
+            return(semi);
+         }
+
+         if (  semi->IsSemicolon()
+            && pc->GetLevel() == semi->GetLevel())
+         {
+            break;
+         }
+      }
+   }
+
+   if (semi->IsNotNullChunk())
+   {
+      // add the parenthesis
+      chunk.SetType(E_Token::CT_PAREN_OPEN);
+      chunk.SetParentType(pc->GetType());
+      chunk.Text() = "(";
+      chunk.SetLevel(pc->GetLevel());
+      chunk.SetPpLevel(pc->GetPpLevel());
+      chunk.SetBraceLevel(pc->GetBraceLevel());
+      chunk.SetOrigLine(pc->GetOrigLine());
+      chunk.SetOrigCol(next->GetOrigCol() - 1);
+      chunk.SetFlags(pc->GetFlags() & PCF_COPY_FLAGS);
+      chunk.CopyAndAddBefore(next);
+
+      chunk.SetType(E_Token::CT_PAREN_CLOSE);
+      chunk.Text() = ")";
+      chunk.SetOrigLine(semi->GetOrigLine());
+      chunk.SetOrigCol(semi->GetOrigCol() - 1);
+      cpar = chunk.CopyAndAddBefore(semi);
+
+      LOG_FMT(LRETURN, "%s(%d): added parens on orig line %zu\n",
+              __func__, __LINE__, pc->GetOrigLine());
+
+      for (temp = next; temp != cpar; temp = temp->GetNext())
+      {
+         temp->SetLevel(temp->GetLevel() + 1);
+      }
+   }
+   return(semi);
+} // process_return_or_throw
+
+
+static bool is_oc_block(Chunk const *pc)
+{
+   return(  pc->GetParentType() == E_Token::CT_OC_BLOCK_TYPE
+         || pc->GetParentType() == E_Token::CT_OC_BLOCK_EXPR
+         || pc->GetParentType() == E_Token::CT_OC_BLOCK_ARG
+         || pc->GetParentType() == E_Token::CT_OC_BLOCK
+         || pc->Is(E_Token::CT_OC_BLOCK_CARET)
+         || pc->GetNext()->Is(E_Token::CT_OC_BLOCK_CARET)
+         || pc->GetPrev()->Is(E_Token::CT_OC_BLOCK_CARET));
+}
+
+
+void mark_comments()
+{
+   LOG_FUNC_ENTRY();
+
+   cpd.unc_stage = unc_stage_e::MARK_COMMENTS;
+
+   bool  prev_nl = true;
+   Chunk *cur    = Chunk::GetHead();
+
+   while (cur->IsNotNullChunk())
+   {
+      Chunk *next   = cur->GetNextNvb();
+      bool  next_nl = next->IsNullChunk() || next->IsNewline();
+
+      if (cur->IsComment())
+      {
+         if (  next_nl
+            && prev_nl)
+         {
+            cur->SetParentType(E_Token::CT_COMMENT_WHOLE);
+         }
+         else if (next_nl)
+         {
+            cur->SetParentType(E_Token::CT_COMMENT_END);
+         }
+         else if (prev_nl)
+         {
+            cur->SetParentType(E_Token::CT_COMMENT_START);
+         }
+         else
+         {
+            cur->SetParentType(E_Token::CT_COMMENT_EMBED);
+         }
+      }
+      prev_nl = cur->IsNewline();
+      cur     = next;
+   }
+}
+
+
+static void handle_cpp_template(Chunk const *pc)
+{
+   LOG_FUNC_ENTRY();
+
+   Chunk *tmp = pc->GetNextNcNnl();
+
+   if (tmp->IsNot(E_Token::CT_ANGLE_OPEN))
+   {
+      return;
+   }
+   tmp->SetParentType(E_Token::CT_TEMPLATE);
+
+   size_t level = tmp->GetLevel();
+
+   tmp = tmp->GetNext();
+
+   while (tmp->IsNotNullChunk())
+   {
+      if (  tmp->Is(E_Token::CT_CLASS)
+         || tmp->Is(E_Token::CT_STRUCT))
+      {
+         tmp->SetType(E_Token::CT_TYPE);
+      }
+      else if (  tmp->Is(E_Token::CT_ANGLE_CLOSE)
+              && tmp->GetLevel() == level)
+      {
+         tmp->SetParentType(E_Token::CT_TEMPLATE);
+         break;
+      }
+      tmp = tmp->GetNext();
+   }
+
+   if (tmp->IsNotNullChunk())
+   {
+      tmp = tmp->GetNextNcNnl();
+
+      if (tmp->Is(E_Token::CT_FRIEND))
+      {
+         // Account for a template friend declaration
+         tmp->SetParentType(E_Token::CT_TEMPLATE);
+
+         tmp = tmp->GetNextNcNnl();
+      }
+
+      if (tmp->IsClassOrStruct())
+      {
+         tmp->SetParentType(E_Token::CT_TEMPLATE);
+
+         // REVISIT: This may be a bit risky - might need to track the { };
+         tmp = tmp->GetNextType(E_Token::CT_SEMICOLON, tmp->GetLevel());
+
+         if (tmp->IsNotNullChunk())
+         {
+            tmp->SetParentType(E_Token::CT_TEMPLATE);
+         }
+      }
+      else
+      {
+         // Check for C++17 deduction guide:
+         // template<T> ClassName(params) -> ClassName<T>;
+         // template<T> explicit ClassName(params) -> ClassName<T>;
+
+         // Skip over qualifiers like 'explicit'
+         if (tmp->Is(E_Token::CT_QUALIFIER))
+         {
+            tmp = tmp->GetNextNcNnl();
+         }
+
+         // Look for pattern: WORD/FUNC_CALL ( ... ) -> TYPE < ... > ;
+         if (  tmp->Is(E_Token::CT_WORD)
+            || tmp->Is(E_Token::CT_FUNC_CALL))
+         {
+            Chunk *name       = tmp;
+            Chunk *paren_open = name->GetNextNcNnl();
+
+            if (  paren_open->IsNotNullChunk()
+               && (  paren_open->Is(E_Token::CT_PAREN_OPEN)
+                  || paren_open->Is(E_Token::CT_FPAREN_OPEN)))
+            {
+               Chunk *paren_close = paren_open->GetClosingParen();
+
+               if (paren_close->IsNotNullChunk())
+               {
+                  Chunk *arrow = paren_close->GetNextNcNnl();
+
+                  if (  arrow->IsNotNullChunk()
+                     && arrow->Is(E_Token::CT_MEMBER)
+                     && arrow->IsString("->"))
+                  {
+                     LOG_FMT(LFCN, "%s(%d): Detected C++17 deduction guide at line %zu\n",
+                             __func__, __LINE__, name->GetOrigLine());
+
+                     // Mark the name as a deduction guide
+                     name->SetType(E_Token::CT_DEDUCTION_GUIDE);
+                     name->SetParentType(E_Token::CT_TEMPLATE);
+
+                     // Mark the parentheses as function parentheses with deduction guide parent
+                     paren_open->SetType(E_Token::CT_FPAREN_OPEN);
+                     paren_open->SetParentType(E_Token::CT_DEDUCTION_GUIDE);
+                     paren_close->SetType(E_Token::CT_FPAREN_CLOSE);
+                     paren_close->SetParentType(E_Token::CT_DEDUCTION_GUIDE);
+
+                     // Mark the arrow as trailing return type with deduction guide parent
+                     arrow->SetType(E_Token::CT_TRAILING_RET);
+                     arrow->SetParentType(E_Token::CT_DEDUCTION_GUIDE);
+
+                     // Process the return type: ClassName<T>;
+                     Chunk *ret_type = arrow->GetNextNcNnl();
+
+                     if (ret_type->IsNotNullChunk())
+                     {
+                        // Mark it as type with deduction guide parent
+                        ret_type->SetType(E_Token::CT_TYPE);
+                        ret_type->SetParentType(E_Token::CT_DEDUCTION_GUIDE);
+
+                        Chunk *angle_open = ret_type->GetNextNcNnl();
+
+                        // Mark the CT_ANGLE_OPEN/CLOSE and following semicolon with deduction guide parent
+                        if (  angle_open->IsNotNullChunk()
+                           && angle_open->Is(E_Token::CT_ANGLE_OPEN))
+                        {
+                           angle_open->SetParentType(E_Token::CT_DEDUCTION_GUIDE);
+
+                           Chunk *angle_close = angle_open->GetClosingParen();
+
+                           if (angle_close->IsNotNullChunk())
+                           {
+                              angle_close->SetParentType(E_Token::CT_DEDUCTION_GUIDE);
+
+                              Chunk *semi = angle_close->GetNextType(E_Token::CT_SEMICOLON, ret_type->GetLevel());
+
+                              if (semi->IsNotNullChunk())
+                              {
+                                 semi->SetParentType(E_Token::CT_DEDUCTION_GUIDE);
+                              }
+                           }
+                        }
+                     }
+                  }
+               }
+            }
+         }
+      }
+   }
+} // handle_cpp_template
+
+
+static void handle_cpp_lambda(Chunk *sq_o)
+{
+   LOG_FUNC_ENTRY();
+
+   Chunk *ret = Chunk::NullChunkPtr;
+
+   // abort if type of the previous token is not contained in this whitelist
+   Chunk const *prev = sq_o->GetPrevNcNnlNi();   // Issue #2279
+
+   if (prev->IsNullChunk())
+   {
+      LOG_FMT(LFCNR, "%s(%d): prev is null chunk\n", __func__, __LINE__);
+   }
+
+   if (  prev->IsNullChunk()
+      || (  prev->IsNot(E_Token::CT_ASSIGN)
+         && prev->IsNot(E_Token::CT_COMMA)
+         && prev->IsNot(E_Token::CT_PAREN_OPEN)   // allow Js like self invoking lambda syntax: ([](){})();
+         && prev->IsNot(E_Token::CT_FPAREN_OPEN)
+         && prev->IsNot(E_Token::CT_SQUARE_OPEN)
+         && prev->IsNot(E_Token::CT_BRACE_OPEN)
+         && prev->IsNot(E_Token::CT_SEMICOLON)
+         && prev->IsNot(E_Token::CT_RETURN)
+         && prev->IsNot(E_Token::CT_ARITH)
+         && prev->IsNot(E_Token::CT_POS)))
+   {
+      LOG_FMT(LFCNR, "%s(%d): return\n", __func__, __LINE__);
+      return;
+   }
+   Chunk *sq_c = sq_o; // assuming '[]'
+
+   if (sq_o->Is(E_Token::CT_SQUARE_OPEN))
+   {
+      // make sure there is a ']'
+      sq_c = sq_o->GetClosingParen();
+
+      if (sq_c->IsNullChunk())
+      {
+         LOG_FMT(LFCNR, "%s(%d): return\n", __func__, __LINE__);
+         return;
+      }
+   }
+   Chunk const *angle_open  = sq_c->GetNextNcNnl();
+   Chunk const *angle_close = Chunk::NullChunkPtr;
+
+   if (angle_open->Is(E_Token::CT_ANGLE_OPEN))
+   {
+      // make sure there is a '>'
+      angle_close = angle_open->GetClosingParen();
+
+      if (angle_close->IsNullChunk())
+      {
+         LOG_FMT(LFCNR, "%s(%d): return\n", __func__, __LINE__);
+         return;
+      }
+   }
+   Chunk *pa_o = (angle_close == Chunk::NullChunkPtr) ? sq_c->GetNextNcNnl() : angle_close->GetNextNcNnl();
+
+   // check to see if there is a lambda-specifier in the pa_o chunk;
+   // assuming chunk is E_Token::CT_EXECUTION_CONTEXT, ignore lambda-specifier
+   while (pa_o->Is(E_Token::CT_EXECUTION_CONTEXT))
+   {
+      // set pa_o to next chunk after this specifier
+      pa_o = pa_o->GetNextNcNnl();
+   }
+
+   if (pa_o->IsNullChunk())
+   {
+      LOG_FMT(LFCNR, "%s(%d): return\n", __func__, __LINE__);
+      return;
+   }
+   Chunk *pa_c = Chunk::NullChunkPtr;
+
+   // lambda-declarator '( params )' is optional
+   if (pa_o->Is(E_Token::CT_PAREN_OPEN))
+   {
+      // and now find the ')'
+      pa_c = pa_o->GetClosingParen();
+
+      if (pa_c->IsNullChunk())
+      {
+         LOG_FMT(LFCNR, "%s(%d): return\n", __func__, __LINE__);
+         return;
+      }
+   }
+   // Check for keywords and attributes: '[]() <keywords|attr> {}' or []() <keywords|attr> -> ret {}
+   Chunk *br_o = pa_c->IsNotNullChunk() ? pa_c->GetNextNcNnl() : pa_o;
+
+   while (  br_o->IsString("mutable")
+         || br_o->IsString("constexpr")
+         || br_o->IsString("consteval")
+         || br_o->IsString("static")
+         || br_o->IsString("noexcept"))
+   {
+      // check if we have noexcept(...)
+      if (br_o->IsString("noexcept"))
+      {
+         Chunk const *closing_paren = br_o->GetNextNcNnl();
+
+         // skip to the closing paren
+         if (closing_paren->IsNotNullChunk() && closing_paren->Is(E_Token::CT_PAREN_OPEN))
+         {
+            br_o = closing_paren->GetClosingParen();
+
+            if (br_o->IsNullChunk())
+            {
+               LOG_FMT(LFCNR, "%s(%d): noexcept without matching closing paren. Return\n", __func__, __LINE__);
+               return;
+            }
+         }
+      }
+      br_o = br_o->GetNextNcNnl();
+   }
+
+   // skip possible arrow syntax: '-> ret'
+   if (br_o->IsString("->"))
+   {
+      ret = br_o;
+      // REVISIT: really should check the stuff we are skipping
+      br_o = br_o->GetNextType(E_Token::CT_BRACE_OPEN, br_o->GetLevel());
+   }
+
+   // skip possible E_Token::CT_NOEXCEPT
+   if (br_o->Is(E_Token::CT_NOEXCEPT)) // Issue #3321
+   {
+      ret = br_o;
+      // REVISIT: really should check the stuff we are skipping
+      br_o = br_o->GetNextType(E_Token::CT_BRACE_OPEN, br_o->GetLevel());
+   }
+
+   if (br_o->IsNullChunk())
+   {
+      LOG_FMT(LFCNR, "%s(%d): br_o is null. Return\n", __func__, __LINE__);
+      return;
+   }
+
+   if (br_o->IsNot(E_Token::CT_BRACE_OPEN))
+   {
+      LOG_FMT(LFCNR, "%s(%d): br_o is '%s'/%s\n",
+              __func__, __LINE__,
+              br_o->GetLogText(), get_token_name(br_o->GetType()));
+      LOG_FMT(LFCNR, "%s(%d): return\n", __func__, __LINE__);
+      return;
+   }
+   // and now find the '}'
+   Chunk *br_c = br_o->GetClosingParen();
+
+   if (br_c->IsNullChunk())
+   {
+      LOG_FMT(LFCNR, "%s(%d): return\n", __func__, __LINE__);
+      return;
+   }
+
+   // This looks like a lambda expression
+   if (sq_o->Is(E_Token::CT_TSQUARE))
+   {
+      // split into two chunks
+      Chunk nc;
+
+      nc = *sq_o;
+      sq_o->SetType(E_Token::CT_SQUARE_OPEN);
+      sq_o->Text().resize(1);
+      /*
+       * bug # 664
+       *
+       * The original m_origCol of E_Token::CT_SQUARE_CLOSE is stored at m_origColEnd
+       * of E_Token::CT_TSQUARE. E_Token::CT_SQUARE_CLOSE m_origCol and m_origColEnd values
+       * are calculate from m_origColEnd of E_Token::CT_TSQUARE.
+       */
+      nc.SetOrigCol(sq_o->GetOrigColEnd() - 1);
+      nc.SetColumn(nc.GetOrigCol());
+      nc.SetOrigColEnd(sq_o->GetOrigColEnd());
+      sq_o->SetOrigColEnd(sq_o->GetOrigCol() + 1);
+
+      nc.SetType(E_Token::CT_SQUARE_CLOSE);
+      nc.Text().pop_front();
+      sq_c = nc.CopyAndAddAfter(sq_o);
+   }
+   sq_o->SetParentType(E_Token::CT_CPP_LAMBDA);
+   sq_c->SetParentType(E_Token::CT_CPP_LAMBDA);
+
+   if (pa_c->IsNotNullChunk())
+   {
+      pa_o->SetType(E_Token::CT_LPAREN_OPEN);                    // Issue #3054
+      pa_o->SetParentType(E_Token::CT_CPP_LAMBDA);
+      pa_o->SetParent(sq_o);
+      br_o->SetParent(sq_o);
+      pa_c->SetType(E_Token::CT_LPAREN_CLOSE);
+      pa_c->SetParentType(E_Token::CT_CPP_LAMBDA);
+      pa_c->SetParent(sq_o);
+      br_c->SetParent(sq_o);
+   }
+   br_o->SetParentType(E_Token::CT_CPP_LAMBDA);
+   br_c->SetParentType(E_Token::CT_CPP_LAMBDA);
+
+   if (ret->IsNotNullChunk())
+   {
+      ret->SetType(E_Token::CT_CPP_LAMBDA_RET);
+      ret = ret->GetNextNcNnl();
+
+      while (ret != br_o)
+      {
+         make_type(ret);
+         ret = ret->GetNextNcNnl();
+      }
+   }
+
+   if (pa_c->IsNotNullChunk())
+   {
+      fix_fcn_def_params(pa_o);
+   }
+   //handle self calling lambda paren
+   Chunk *call_pa_o = br_c->GetNextNcNnl();
+
+   if (call_pa_o->Is(E_Token::CT_PAREN_OPEN))
+   {
+      Chunk *call_pa_c = call_pa_o->GetClosingParen();
+
+      if (call_pa_c->IsNotNullChunk())
+      {
+         call_pa_o->SetType(E_Token::CT_FPAREN_OPEN);
+         call_pa_o->SetParentType(E_Token::CT_FUNC_CALL);
+         call_pa_c->SetType(E_Token::CT_FPAREN_CLOSE);
+         call_pa_c->SetParentType(E_Token::CT_FUNC_CALL);
+      }
+   }
+   mark_cpp_lambda(sq_o);
+} // handle_cpp_lambda
+
+
+static void handle_d_template(Chunk const *pc)
+{
+   LOG_FUNC_ENTRY();
+
+   Chunk *name = pc->GetNextNcNnl();
+   Chunk *po   = name->GetNextNcNnl();
+
+   if (  name->IsNullChunk()
+      || name->IsNot(E_Token::CT_WORD))
+   {
+      // TODO: log an error, expected NAME
+      return;
+   }
+
+   if (  po->IsNullChunk()
+      || po->IsNot(E_Token::CT_PAREN_OPEN))
+   {
+      // TODO: log an error, expected '('
+      return;
+   }
+   name->SetType(E_Token::CT_TYPE);
+   name->SetParentType(E_Token::CT_TEMPLATE);
+   po->SetParentType(E_Token::CT_TEMPLATE);
+
+   ChunkStack cs;
+   Chunk      *tmp = get_d_template_types(cs, po);
+
+   if (  tmp->IsNullChunk()
+      || tmp->IsNot(E_Token::CT_PAREN_CLOSE))
+   {
+      // TODO: log an error, expected ')'
+      return;
+   }
+   tmp->SetParentType(E_Token::CT_TEMPLATE);
+
+   tmp = tmp->GetNextNcNnl();
+
+   if (tmp->IsNot(E_Token::CT_BRACE_OPEN))
+   {
+      // TODO: log an error, expected '{'
+      return;
+   }
+   tmp->SetParentType(E_Token::CT_TEMPLATE);
+   po  = tmp;
+   tmp = tmp->GetNextNcNnl();
+
+   while (  tmp->IsNotNullChunk()
+         && tmp->GetLevel() > po->GetLevel())
+   {
+      if (  tmp->Is(E_Token::CT_WORD)
+         && chunkstack_match(cs, tmp))
+      {
+         tmp->SetType(E_Token::CT_TYPE);
+      }
+      tmp = tmp->GetNextNcNnl();
+   }
+//   if (!tmp->Is(E_Token::CT_BRACE_CLOSE))
+//   {
+//      // TODO: log an error, expected '}'
+//   }
+   tmp->SetParentType(E_Token::CT_TEMPLATE);
+} // handle_d_template
+
+
+Chunk *skip_template_next(Chunk *ang_open)
+{
+   if (ang_open->Is(E_Token::CT_ANGLE_OPEN))
+   {
+      Chunk const *pc = ang_open->GetNextType(E_Token::CT_ANGLE_CLOSE, ang_open->GetLevel());
+
+      if (pc->IsNullChunk())
+      {
+         return(Chunk::NullChunkPtr);
+      }
+      return(pc->GetNextNcNnl());
+   }
+   return(ang_open);
+}
+
+
+static void handle_oc_class(Chunk *pc)
+{
+   enum class angle_state_e : unsigned int
+   {
+      NONE  = 0,
+      OPEN  = 1, // '<' found
+      CLOSE = 2, // '>' found
+   };
+
+   LOG_FUNC_ENTRY();
+   Chunk         *tmp;
+   bool          hit_scope     = false;
+   bool          passed_name   = false; // Did we pass the name of the class and now there can be only protocols, not generics
+   int           generic_level = 0;     // level of depth of generic
+   angle_state_e as            = angle_state_e::NONE;
+
+   LOG_FMT(LOCCLASS, "%s(%d): start [%s] [%s] line %zu\n",
+           __func__, __LINE__, pc->GetLogText(), get_token_name(pc->GetParentType()), pc->GetOrigLine());
+
+   if (pc->GetParentType() == E_Token::CT_OC_PROTOCOL)
+   {
+      tmp = pc->GetNextNcNnl();
+
+      if (tmp->IsSemicolon())
+      {
+         tmp->SetParentType(pc->GetParentType());
+         LOG_FMT(LOCCLASS, "%s(%d):   bail on semicolon\n", __func__, __LINE__);
+         return;
+      }
+      // For @protocol declarations, we've already passed the name and any angle brackets
+      // are protocol conformance lists, not generic specs
+      passed_name = true;
+   }
+   tmp = pc;
+
+   while ((tmp = tmp->GetNextNnl())->IsNotNullChunk())
+   {
+      LOG_FMT(LOCCLASS, "%s(%d):       orig line is %zu, [%s]\n",
+              __func__, __LINE__, tmp->GetOrigLine(), tmp->GetLogText());
+
+      if (tmp->Is(E_Token::CT_OC_END))
+      {
+         break;
+      }
+
+      if (tmp->Is(E_Token::CT_PAREN_OPEN))
+      {
+         passed_name = true;
+      }
+
+      // After seeing the class/protocol name, any angle brackets are protocol lists
+      if (  tmp->Is(E_Token::CT_OC_CLASS)
+         && !passed_name)
+      {
+         passed_name = true;
+      }
+
+      if (tmp->IsString("<"))
+      {
+         tmp->SetType(E_Token::CT_ANGLE_OPEN);
+
+         if (passed_name)
+         {
+            tmp->SetParentType(E_Token::CT_OC_PROTO_LIST);
+         }
+         else
+         {
+            tmp->SetParentType(E_Token::CT_OC_GENERIC_SPEC);
+            generic_level++;
+         }
+         as = angle_state_e::OPEN;
+      }
+
+      if (tmp->IsString(">"))
+      {
+         tmp->SetType(E_Token::CT_ANGLE_CLOSE);
+
+         if (passed_name)
+         {
+            tmp->SetParentType(E_Token::CT_OC_PROTO_LIST);
+            as = angle_state_e::CLOSE;
+         }
+         else
+         {
+            tmp->SetParentType(E_Token::CT_OC_GENERIC_SPEC);
+
+            if (generic_level == 0)
+            {
+               fprintf(stderr, "%s(%d): generic_level is ZERO, cannot be decremented, at line %zu, column %zu\n",
+                       __func__, __LINE__, tmp->GetOrigLine(), tmp->GetOrigCol());
+               log_flush(true);
+               exit(EX_SOFTWARE);
+            }
+            generic_level--;
+
+            if (generic_level == 0)
+            {
+               as = angle_state_e::CLOSE;
+            }
+         }
+      }
+
+      if (tmp->IsString(">>"))
+      {
+         tmp->SetType(E_Token::CT_ANGLE_CLOSE);
+         tmp->SetParentType(E_Token::CT_OC_GENERIC_SPEC);
+         split_off_angle_close(tmp);
+         generic_level -= 1;
+
+         if (generic_level == 0)
+         {
+            as = angle_state_e::CLOSE;
+         }
+      }
+
+      if (  tmp->Is(E_Token::CT_BRACE_OPEN)
+         && tmp->GetParentType() != E_Token::CT_ASSIGN)
+      {
+         as = angle_state_e::CLOSE;
+         tmp->SetParentType(E_Token::CT_OC_CLASS);
+         tmp = tmp->GetNextType(E_Token::CT_BRACE_CLOSE, tmp->GetLevel());
+
+         if (  tmp->IsNotNullChunk()
+            && tmp->GetParentType() != E_Token::CT_ASSIGN)
+         {
+            tmp->SetParentType(E_Token::CT_OC_CLASS);
+         }
+      }
+      else if (tmp->Is(E_Token::CT_COLON))
+      {
+         if (as != angle_state_e::OPEN)
+         {
+            passed_name = true;
+         }
+         tmp->SetType(hit_scope ? E_Token::CT_OC_COLON : E_Token::CT_CLASS_COLON);
+
+         if (tmp->Is(E_Token::CT_CLASS_COLON))
+         {
+            tmp->SetParentType(E_Token::CT_OC_CLASS);
+         }
+      }
+      else if (  tmp->IsString("-")
+              || tmp->IsString("+"))
+      {
+         as = angle_state_e::CLOSE;
+
+         if (tmp->GetPrev()->IsNewline())
+         {
+            tmp->SetType(E_Token::CT_OC_SCOPE);
+            tmp->SetFlagBits(PCF_STMT_START);
+            log_ruleStart("start statement", tmp);
+            hit_scope = true;
+         }
+      }
+
+      if (as == angle_state_e::OPEN)
+      {
+         if (passed_name)
+         {
+            tmp->SetParentType(E_Token::CT_OC_PROTO_LIST);
+         }
+         else
+         {
+            tmp->SetParentType(E_Token::CT_OC_GENERIC_SPEC);
+         }
+      }
+   }
+
+   if (tmp->Is(E_Token::CT_BRACE_OPEN))
+   {
+      tmp = tmp->GetNextType(E_Token::CT_BRACE_CLOSE, tmp->GetLevel());
+
+      if (tmp->IsNotNullChunk())
+      {
+         tmp->SetParentType(E_Token::CT_OC_CLASS);
+      }
+   }
+} // handle_oc_class
+
+
+static void handle_oc_block_literal(Chunk *pc)
+{
+   LOG_FUNC_ENTRY();
+
+   Chunk const *prev = pc->GetPrevNcNnlNi();   // Issue #2279
+   Chunk       *next = pc->GetNextNcNnl();
+
+   if (  prev->IsNullChunk()
+      || next->IsNullChunk())
+   {
+      return; // let's be paranoid
+   }
+   /*
+    * block literal: '^ RTYPE ( ARGS ) { }'
+    * RTYPE and ARGS are optional
+    */
+   LOG_FMT(LOCBLK, "%s(%d): block literal @ orig line is %zu, orig col is %zu\n",
+           __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+
+   Chunk *apo = Chunk::NullChunkPtr; // arg paren open
+   Chunk *bbo = Chunk::NullChunkPtr; // block brace open
+   Chunk *bbc;                       // block brace close
+
+   LOG_FMT(LOCBLK, "%s(%d):  + scan", __func__, __LINE__);
+   Chunk *tmp;
+
+   for (tmp = next; tmp->IsNotNullChunk(); tmp = tmp->GetNextNcNnl())
+   {
+      /* handle '< protocol >' */
+      if (tmp->IsString("<"))
+      {
+         Chunk *ao = tmp;
+         Chunk *ac = ao->GetNextString(">", 1, ao->GetLevel());
+
+         if (ac->IsNotNullChunk())
+         {
+            ao->SetType(E_Token::CT_ANGLE_OPEN);
+            ao->SetParentType(E_Token::CT_OC_PROTO_LIST);
+            ac->SetType(E_Token::CT_ANGLE_CLOSE);
+            ac->SetParentType(E_Token::CT_OC_PROTO_LIST);
+
+            for (tmp = ao->GetNext(); tmp != ac; tmp = tmp->GetNext())
+            {
+               tmp->SetLevel(tmp->GetLevel() + 1);
+               tmp->SetParentType(E_Token::CT_OC_PROTO_LIST);
+            }
+
+            tmp = ac->GetNextNcNnl();
+         }
+         else
+         {
+            tmp = Chunk::NullChunkPtr;
+         }
+      }
+      LOG_FMT(LOCBLK, " '%s'", tmp->GetLogText());
+
+      if (  tmp->GetLevel() < pc->GetLevel()
+         || tmp->Is(E_Token::CT_SEMICOLON))
+      {
+         LOG_FMT(LOCBLK, "[DONE]");
+         break;
+      }
+
+      if (tmp->GetLevel() == pc->GetLevel())
+      {
+         if (tmp->IsParenOpen())
+         {
+            apo = tmp;
+            LOG_FMT(LOCBLK, "[PAREN]");
+         }
+
+         if (tmp->Is(E_Token::CT_BRACE_OPEN))
+         {
+            LOG_FMT(LOCBLK, "[BRACE]");
+            bbo = tmp;
+            break;
+         }
+      }
+   }
+
+   // make sure we have braces
+   bbc = bbo->GetClosingParen();
+
+   if (  bbo->IsNullChunk()
+      || bbc->IsNullChunk())
+   {
+      LOG_FMT(LOCBLK, " -- no braces found\n");
+      return;
+   }
+   LOG_FMT(LOCBLK, "\n");
+
+   // we are on a block literal for sure
+   pc->SetType(E_Token::CT_OC_BLOCK_CARET);
+   pc->SetParentType(E_Token::CT_OC_BLOCK_EXPR);
+
+   // handle the optional args
+   Chunk *lbp; // last before paren - end of return type, if any
+
+   if (apo->IsNotNullChunk())
+   {
+      Chunk const *apc = apo->GetClosingParen();  // arg parenthesis close
+
+      if (apc->IsParenClose())
+      {
+         LOG_FMT(LOCBLK, " -- marking parens @ apo orig line is %zu, orig col is %zu and apc orig line is %zu, orig col is %zu\n",
+                 apo->GetOrigLine(), apo->GetOrigCol(), apc->GetOrigLine(), apc->GetOrigCol());
+         flag_parens(apo, PCF_OC_ATYPE, E_Token::CT_FPAREN_OPEN, E_Token::CT_OC_BLOCK_EXPR, true);
+         fix_fcn_def_params(apo);
+      }
+      lbp = apo->GetPrevNcNnlNi();   // Issue #2279
+   }
+   else
+   {
+      lbp = bbo->GetPrevNcNnlNi();   // Issue #2279
+   }
+
+   // mark the return type, if any
+   while (lbp != pc)
+   {
+      LOG_FMT(LOCBLK, " -- lbp %s[%s]\n", lbp->GetLogText(), get_token_name(lbp->GetType()));
+      make_type(lbp);
+      lbp->SetFlagBits(PCF_OC_RTYPE);
+      lbp->SetParentType(E_Token::CT_OC_BLOCK_EXPR);
+      lbp = lbp->GetPrevNcNnlNi();   // Issue #2279
+   }
+   // mark the braces
+   bbo->SetParentType(E_Token::CT_OC_BLOCK_EXPR);
+   bbc->SetParentType(E_Token::CT_OC_BLOCK_EXPR);
+
+   // mark the OC_BLOCK
+   for (Chunk *tmp1 = bbo; tmp1 != bbc; tmp1 = tmp1->GetNextNcNnl())
+   {
+      tmp1->SetFlagBits(PCF_OC_IN_BLOCK);
+   }
+} // handle_oc_block_literal
+
+
+static void handle_oc_block_type(Chunk *pc)
+{
+   LOG_FUNC_ENTRY();
+
+   if (pc->IsNullChunk())
+   {
+      return;
+   }
+
+   if (pc->TestFlags(PCF_IN_TYPEDEF))
+   {
+      LOG_FMT(LOCBLK, "%s(%d): skip block type @ orig line is %zu, orig col is %zu, -- in typedef\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+      return;
+   }
+   // make sure we have '( ^'
+   Chunk *tpo = pc->GetPrevNcNnlNi(); // type paren open   Issue #2279
+
+   if (tpo->IsParenOpen())
+   {
+      /*
+       * block type: 'RTYPE (^LABEL)(ARGS)'
+       * LABEL is optional.
+       */
+      Chunk *tpc = tpo->GetClosingParen(); // type close paren (after '^')
+      Chunk *nam = tpc->GetPrevNcNnlNi();  // name (if any) or '^'   Issue #2279
+      Chunk *apo = tpc->GetNextNcNnl();    // arg open paren
+      Chunk *apc = apo->GetClosingParen(); // arg close paren
+
+      /*
+       * If this is a block literal instead of a block type, 'nam'
+       * will actually be the closing bracket of the block. We run into
+       * this situation if a block literal is enclosed in parentheses.
+       */
+      if (nam->IsBraceClose())
+      {
+         return(handle_oc_block_literal(pc));
+      }
+
+      // Check apo is '(' or else this might be a block literal. Issue 2643.
+      if (!apo->IsParenOpen())
+      {
+         return(handle_oc_block_literal(pc));
+      }
+
+      if (apc->IsParenClose())
+      {
+         Chunk const *aft = apc->GetNextNcNnl();
+         E_Token     pt;
+
+         if (nam->IsString("^"))
+         {
+            nam->SetType(E_Token::CT_PTR_TYPE);
+            pt = E_Token::CT_FUNC_TYPE;
+         }
+         else if (  aft->Is(E_Token::CT_ASSIGN)
+                 || aft->Is(E_Token::CT_SEMICOLON))
+         {
+            nam->SetType(E_Token::CT_FUNC_VAR);
+            pt = E_Token::CT_FUNC_VAR;
+         }
+         else
+         {
+            nam->SetType(E_Token::CT_FUNC_TYPE);
+            pt = E_Token::CT_FUNC_TYPE;
+         }
+         LOG_FMT(LOCBLK, "%s(%d): block type @ orig line is %zu, orig col is %zu, text '%s'[%s]\n",
+                 __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), nam->GetLogText(), get_token_name(nam->GetType()));
+         pc->SetType(E_Token::CT_PTR_TYPE);
+         pc->SetParentType(pt);  //E_Token::CT_OC_BLOCK_TYPE;
+         tpo->SetType(E_Token::CT_TPAREN_OPEN);
+         tpo->SetParentType(pt); //E_Token::CT_OC_BLOCK_TYPE;
+         tpc->SetType(E_Token::CT_TPAREN_CLOSE);
+         tpc->SetParentType(pt); //E_Token::CT_OC_BLOCK_TYPE;
+         apo->SetType(E_Token::CT_FPAREN_OPEN);
+         apo->SetParentType(E_Token::CT_FUNC_PROTO);
+         apc->SetType(E_Token::CT_FPAREN_CLOSE);
+         apc->SetParentType(E_Token::CT_FUNC_PROTO);
+         fix_fcn_def_params(apo);
+         mark_function_return_type(nam, tpo->GetPrevNcNnlNi(), pt);   // Issue #2279
+      }
+   }
+} // handle_oc_block_type
+
+
+static Chunk *handle_oc_md_type(Chunk *paren_open, E_Token ptype, PcfFlags flags, bool &did_it)
+{
+   Chunk *paren_close;
+
+   if (  !paren_open->IsParenOpen()
+      || ((paren_close = paren_open->GetClosingParen())->IsNullChunk()))
+   {
+      did_it = false;
+      return(paren_open);
+   }
+   did_it = true;
+
+   paren_open->SetParentType(ptype);
+   paren_open->SetFlagBits(flags);
+   paren_close->SetParentType(ptype);
+   paren_close->SetFlagBits(flags);
+
+   for (Chunk *cur = paren_open->GetNextNcNnl();
+        cur != paren_close;
+        cur = cur->GetNextNcNnl())
+   {
+      LOG_FMT(LOCMSGD, " <%s|%s>", cur->GetLogText(), get_token_name(cur->GetType()));
+      cur->SetFlagBits(flags);
+      make_type(cur);
+   }
+
+   // returning the chunk after the paren close
+   return(paren_close->GetNextNcNnl());
+}
+
+
+static void handle_oc_message_decl(Chunk *pc)
+{
+   LOG_FUNC_ENTRY();
+
+   bool did_it;
+   //bool      in_paren  = false;
+   //int       paren_cnt = 0;
+   //int       arg_cnt   = 0;
+
+   // Figure out if this is a spec or decl
+   Chunk *tmp = pc;
+
+   while ((tmp = tmp->GetNext())->IsNotNullChunk())
+   {
+      if (tmp->GetLevel() < pc->GetLevel())
+      {
+         // should not happen
+         return;
+      }
+
+      if (  tmp->Is(E_Token::CT_SEMICOLON)
+         || tmp->Is(E_Token::CT_BRACE_OPEN))
+      {
+         break;
+      }
+   }
+
+   if (tmp->IsNullChunk())
+   {
+      return;
+   }
+   E_Token pt = tmp->Is(E_Token::CT_SEMICOLON) ? E_Token::CT_OC_MSG_SPEC : E_Token::CT_OC_MSG_DECL;
+
+   pc->SetType(E_Token::CT_OC_SCOPE);
+   pc->SetParentType(pt);
+
+   LOG_FMT(LOCMSGD, "%s(%d): %s @ orig line is %zu, orig col is %zu -",
+           __func__, __LINE__, get_token_name(pt), pc->GetOrigLine(), pc->GetOrigCol());
+
+   // format: -(TYPE) NAME [: (TYPE)NAME
+
+   // handle the return type
+   tmp = handle_oc_md_type(pc->GetNextNcNnl(), pt, PCF_OC_RTYPE, did_it);
+
+   if (!did_it)
+   {
+      LOG_FMT(LOCMSGD, " -- missing type parens\n");
+      return;
+   }
+
+   // expect the method name/label
+   if (tmp->IsNot(E_Token::CT_WORD))
+   {
+      LOG_FMT(LOCMSGD, " -- missing method name\n");
+      return;
+   }  // expect the method name/label
+
+   Chunk *label = tmp;
+
+   tmp->SetType(pt);
+   tmp->SetParentType(pt);
+   pc = tmp->GetNextNcNnl();
+
+   LOG_FMT(LOCMSGD, " [%s]%s", pc->GetLogText(), get_token_name(pc->GetType()));
+
+   // if we have a colon next, we have args
+   if (  pc->Is(E_Token::CT_COLON)
+      || pc->Is(E_Token::CT_OC_COLON))
+   {
+      pc = label;
+
+      while (true)
+      {
+         // skip optional label
+         if (  pc->Is(E_Token::CT_WORD)
+            || pc->Is(pt))
+         {
+            pc->SetParentType(pt);
+            pc = pc->GetNextNcNnl();
+         }
+
+         // a colon must be next
+         if (!pc->IsString(":"))
+         {
+            break;
+         }
+         pc->SetType(E_Token::CT_OC_COLON);
+         pc->SetParentType(pt);
+         pc = pc->GetNextNcNnl();
+
+         // next is the type in parens
+         LOG_FMT(LOCMSGD, "  (%s)", pc->GetLogText());
+         tmp = handle_oc_md_type(pc, pt, PCF_OC_ATYPE, did_it);
+
+         if (!did_it)
+         {
+            LOG_FMT(LWARN, "%s(%d): orig line is %zu, orig col is %zu expected type\n",
+                    __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+            break;
+         }
+         // attributes for a method parameter sit between the parameter type and the parameter name
+         pc = skip_attribute_next(tmp);
+         // we should now be on the arg name
+         pc->SetFlagBits(PCF_VAR_DEF);
+         LOG_FMT(LOCMSGD, " arg[%s]", pc->GetLogText());
+         pc = pc->GetNextNcNnl();
+      }
+   }
+   LOG_FMT(LOCMSGD, " end[%s]", pc->GetLogText());
+
+   if (pc->Is(E_Token::CT_BRACE_OPEN))
+   {
+      pc->SetParentType(pt);
+      pc = pc->GetClosingParen();
+
+      if (pc->IsNotNullChunk())
+      {
+         pc->SetParentType(pt);
+      }
+   }
+   else if (pc->Is(E_Token::CT_SEMICOLON))
+   {
+      pc->SetParentType(pt);
+   }
+   LOG_FMT(LOCMSGD, "\n");
+} // handle_oc_message_decl
+
+
+static void handle_oc_message_send(Chunk *os)
+{
+   LOG_FUNC_ENTRY();
+
+   Chunk *cs = os->GetNext();
+
+   while (  cs->IsNotNullChunk()
+         && cs->GetLevel() > os->GetLevel())
+   {
+      cs = cs->GetNext();
+   }
+
+   if (  cs->IsNullChunk()
+      || cs->IsNot(E_Token::CT_SQUARE_CLOSE))
+   {
+      return;
+   }
+   LOG_FMT(LOCMSG, "%s(%d): orig line is %zu, orig col is %zu\n",
+           __func__, __LINE__, os->GetOrigLine(), os->GetOrigCol());
+
+   Chunk *tmp = cs->GetNextNcNnl();
+
+   if (tmp->IsSemicolon())
+   {
+      tmp->SetParentType(E_Token::CT_OC_MSG);
+   }
+   // expect a word first thing or [...]
+   tmp = os->GetNextNcNnl();
+
+   if (  tmp->Is(E_Token::CT_SQUARE_OPEN)
+      || tmp->Is(E_Token::CT_PAREN_OPEN)
+      || tmp->Is(E_Token::CT_OC_AT))
+   {
+      Chunk *tt = tmp->GetNextNcNnl();
+
+      if (  tmp->Is(E_Token::CT_OC_AT)
+         && tt->IsNotNullChunk())
+      {
+         if (  tt->Is(E_Token::CT_PAREN_OPEN)
+            || tt->Is(E_Token::CT_BRACE_OPEN)
+            || tt->Is(E_Token::CT_SQUARE_OPEN))
+         {
+            tmp = tt;
+         }
+         else
+         {
+            LOG_FMT(LOCMSG, "%s(%d): tmp orig line is %zu, orig col is %zu, expected identifier, not '%s' [%s]\n",
+                    __func__, __LINE__, tmp->GetOrigLine(), tmp->GetOrigCol(),
+                    tmp->GetLogText(), get_token_name(tmp->GetType()));
+            return;
+         }
+      }
+      tmp = tmp->GetClosingParen();
+   }
+   else if (  tmp->IsNot(E_Token::CT_WORD)
+           && tmp->IsNot(E_Token::CT_TYPE)
+           && tmp->IsNot(E_Token::CT_THIS)
+           && tmp->IsNot(E_Token::CT_STAR)
+           && tmp->IsNot(E_Token::CT_STRING))
+   {
+      LOG_FMT(LOCMSG, "%s(%d): orig line is %zu, orig col is %zu, expected identifier, not '%s' [%s]\n",
+              __func__, __LINE__, tmp->GetOrigLine(), tmp->GetOrigCol(),
+              tmp->GetLogText(), get_token_name(tmp->GetType()));
+      return;
+   }
+   else
+   {
+      if (tmp->IsStar()) // Issue #2722
+      {
+         tmp->SetType(E_Token::CT_PTR_TYPE);
+         tmp = tmp->GetNextNcNnl();
+      }
+      Chunk *tt = tmp->GetNextNcNnl();
+
+      if (tt->IsParenOpen())
+      {
+         LOG_FMT(LFCN, "%s(%d): (18) SET TO E_Token::CT_FUNC_CALL: orig line is %zu, orig col is %zu, text '%s'\n",
+                 __func__, __LINE__, tmp->GetOrigLine(), tmp->GetOrigCol(), tmp->GetLogText());
+         tmp->SetType(E_Token::CT_FUNC_CALL);
+         tmp = set_paren_parent(tt, E_Token::CT_FUNC_CALL)->GetPrevNcNnlNi();   // Issue #2279
+      }
+      else
+      {
+         tmp->SetType(E_Token::CT_OC_MSG_CLASS);
+      }
+   }
+   os->SetParentType(E_Token::CT_OC_MSG);
+   os->SetFlagBits(PCF_IN_OC_MSG);
+   cs->SetParentType(E_Token::CT_OC_MSG);
+   cs->SetFlagBits(PCF_IN_OC_MSG);
+
+   // handle '< protocol >'
+   tmp = tmp->GetNextNcNnl();
+
+   if (tmp->IsString("<"))
+   {
+      Chunk *ao = tmp;
+      Chunk *ac = ao->GetNextString(">", 1, ao->GetLevel());
+
+      if (ac->IsNotNullChunk())
+      {
+         ao->SetType(E_Token::CT_ANGLE_OPEN);
+         ao->SetParentType(E_Token::CT_OC_PROTO_LIST);
+         ac->SetType(E_Token::CT_ANGLE_CLOSE);
+         ac->SetParentType(E_Token::CT_OC_PROTO_LIST);
+
+         for (tmp = ao->GetNext(); tmp != ac; tmp = tmp->GetNext())
+         {
+            tmp->SetLevel(tmp->GetLevel() + 1);
+            tmp->SetParentType(E_Token::CT_OC_PROTO_LIST);
+         }
+
+         tmp = ac->GetNextNcNnl();
+      }
+      else
+      {
+         tmp = Chunk::NullChunkPtr;
+      }
+   }
+   // handle 'object.property' and 'collection[index]'
+   else
+   {
+      while (tmp->IsNotNullChunk())
+      {
+         if (tmp->Is(E_Token::CT_MEMBER))  // move past [object.prop1.prop2
+         {
+            Chunk const *typ = tmp->GetNextNcNnl();
+
+            if (  typ->Is(E_Token::CT_WORD)
+               || typ->Is(E_Token::CT_TYPE))
+            {
+               tmp = typ->GetNextNcNnl();
+            }
+            else
+            {
+               break;
+            }
+         }
+         else if (tmp->Is(E_Token::CT_SQUARE_OPEN))  // move past [collection[index]
+         {
+            Chunk const *tcs = tmp->GetNextNcNnl();
+
+            while (  tcs->IsNotNullChunk()
+                  && tcs->GetLevel() > tmp->GetLevel())
+            {
+               tcs = tcs->GetNextNcNnl();
+            }
+
+            if (tcs->Is(E_Token::CT_SQUARE_CLOSE))
+            {
+               tmp = tcs->GetNextNcNnl();
+            }
+            else
+            {
+               break;
+            }
+         }
+         else
+         {
+            break;
+         }
+      }
+   }
+
+   // [(self.foo.bar) method]
+   if (tmp->IsParenOpen())
+   {
+      tmp = tmp->GetClosingParen()->GetNextNcNnl();
+   }
+
+   if (  tmp->Is(E_Token::CT_WORD)
+      || tmp->Is(E_Token::CT_ACCESS)
+      || tmp->Is(E_Token::CT_TYPE))
+   {
+      tmp->SetType(E_Token::CT_OC_MSG_FUNC);
+   }
+   Chunk *prev = Chunk::NullChunkPtr;
+
+   for (tmp = os->GetNext(); tmp != cs; tmp = tmp->GetNext())
+   {
+      tmp->SetFlagBits(PCF_IN_OC_MSG);
+
+      if (tmp->GetLevel() == cs->GetLevel() + 1)
+      {
+         if (  tmp->Is(E_Token::CT_COLON)
+            || tmp->Is(E_Token::CT_ACCESS_COLON))
+         {
+            tmp->SetType(E_Token::CT_OC_COLON);
+
+            if (  prev->Is(E_Token::CT_WORD)
+               || prev->Is(E_Token::CT_ACCESS)
+               || prev->Is(E_Token::CT_TYPE))
+            {
+               // Might be a named param, check previous block
+               Chunk const *pp = prev->GetPrev();
+
+               if (  pp->IsNotNullChunk()
+                  && pp->IsNot(E_Token::CT_OC_COLON)
+                  && pp->IsNot(E_Token::CT_ARITH)
+                  && pp->IsNot(E_Token::CT_SHIFT)
+                  && pp->IsNot(E_Token::CT_CARET))
+               {
+                  prev->SetType(E_Token::CT_OC_MSG_NAME);
+                  tmp->SetParentType(E_Token::CT_OC_MSG_NAME);
+               }
+            }
+         }
+      }
+      prev = tmp;
+   }
+} // handle_oc_message_send
+
+
+static void handle_oc_available(Chunk *os)
+{
+   os = os->GetNext();
+
+   while (os->IsNotNullChunk())
+   {
+      E_Token origType = os->GetType();
+      os->SetType(E_Token::CT_OC_AVAILABLE_VALUE);
+
+      if (origType == E_Token::CT_PAREN_CLOSE)
+      {
+         break;
+      }
+      os = os->GetNext();
+   }
+}
+
+
+static void handle_oc_property_decl(Chunk const *os)
+{
+   log_rule_B("mod_sort_oc_properties");
+
+   if (options::mod_sort_oc_properties())
+   {
+      typedef std::vector<Chunk *> ChunkGroup;
+
+      Chunk *next = os->GetNext();
+      Chunk *open_paren;
+
+      if (next->Is(E_Token::CT_PAREN_OPEN))
+      {
+         std::vector<ChunkGroup> class_chunks;       // class
+         std::vector<ChunkGroup> thread_chunks;      // atomic, nonatomic
+         std::vector<ChunkGroup> readwrite_chunks;   // readwrite, readonly
+         std::vector<ChunkGroup> ref_chunks;         // retain, copy, assign, weak, strong, unsafe_unretained
+         std::vector<ChunkGroup> getter_chunks;      // getter
+         std::vector<ChunkGroup> setter_chunks;      // setter
+         std::vector<ChunkGroup> nullability_chunks; // nonnull, nullable, null_unspecified, null_resettable
+         std::vector<ChunkGroup> other_chunks;       // any words other than above
+         open_paren = next;
+         next       = next->GetNext();
+
+         /*
+          * Determine location of the property attributes
+          * NOTE: Did not do this in the combine.cpp do_symbol_check as
+          * I was not sure what the ramifications of adding a new type
+          * for each of the below types would be. It did break some items
+          * when I attempted to add them so this is my hack for now.
+          */
+         while (  next->IsNotNullChunk()
+               && next->IsNot(E_Token::CT_PAREN_CLOSE))
+         {
+            if (next->Is(E_Token::CT_OC_PROPERTY_ATTR))
+            {
+               if (  next->IsString("atomic")
+                  || next->IsString("nonatomic"))
+               {
+                  ChunkGroup chunkGroup;
+                  chunkGroup.push_back(next);
+                  thread_chunks.push_back(chunkGroup);
+               }
+               else if (  next->IsString("readonly")
+                       || next->IsString("readwrite"))
+               {
+                  ChunkGroup chunkGroup;
+                  chunkGroup.push_back(next);
+                  readwrite_chunks.push_back(chunkGroup);
+               }
+               else if (  next->IsString("assign")
+                       || next->IsString("retain")
+                       || next->IsString("copy")
+                       || next->IsString("strong")
+                       || next->IsString("weak")
+                       || next->IsString("unsafe_unretained"))
+               {
+                  ChunkGroup chunkGroup;
+                  chunkGroup.push_back(next);
+                  ref_chunks.push_back(chunkGroup);
+               }
+               else if (next->IsString("getter"))
+               {
+                  ChunkGroup chunkGroup;
+
+                  do
+                  {
+                     chunkGroup.push_back(next);
+                     next = next->GetNext();
+                  } while (  next->IsNotNullChunk()
+                          && next->IsNot(E_Token::CT_COMMA)
+                          && next->IsNot(E_Token::CT_PAREN_CLOSE));
+
+                  next = next->GetPrev();
+
+                  // coverity CID 160946
+                  if (next->IsNullChunk())
+                  {
+                     break;
+                  }
+                  getter_chunks.push_back(chunkGroup);
+               }
+               else if (next->IsString("setter"))
+               {
+                  ChunkGroup chunkGroup;
+
+                  do
+                  {
+                     chunkGroup.push_back(next);
+                     next = next->GetNext();
+                  } while (  next->IsNotNullChunk()
+                          && next->IsNot(E_Token::CT_COMMA)
+                          && next->IsNot(E_Token::CT_PAREN_CLOSE));
+
+                  if (next->IsNotNullChunk())
+                  {
+                     next = next->GetPrev();
+                  }
+
+                  if (next->IsNullChunk())
+                  {
+                     break;
+                  }
+                  setter_chunks.push_back(chunkGroup);
+               }
+               else if (  next->IsString("nullable")
+                       || next->IsString("nonnull")
+                       || next->IsString("null_resettable")
+                       || next->IsString("null_unspecified"))
+               {
+                  ChunkGroup chunkGroup;
+                  chunkGroup.push_back(next);
+                  nullability_chunks.push_back(chunkGroup);
+               }
+               else if (next->IsString("class"))
+               {
+                  ChunkGroup chunkGroup;
+                  chunkGroup.push_back(next);
+                  class_chunks.push_back(chunkGroup);
+               }
+               else
+               {
+                  ChunkGroup chunkGroup;
+                  chunkGroup.push_back(next);
+                  other_chunks.push_back(chunkGroup);
+               }
+            }
+            else if (next->IsWord())
+            {
+               if (next->IsString("class"))
+               {
+                  ChunkGroup chunkGroup;
+                  chunkGroup.push_back(next);
+                  class_chunks.push_back(chunkGroup);
+               }
+               else
+               {
+                  ChunkGroup chunkGroup;
+                  chunkGroup.push_back(next);
+                  other_chunks.push_back(chunkGroup);
+               }
+            }
+            next = next->GetNext();
+         }
+         log_rule_B("mod_sort_oc_property_class_weight");
+         int class_w = options::mod_sort_oc_property_class_weight();
+         log_rule_B("mod_sort_oc_property_thread_safe_weight");
+         int thread_w = options::mod_sort_oc_property_thread_safe_weight();
+         log_rule_B("mod_sort_oc_property_readwrite_weight");
+         int readwrite_w = options::mod_sort_oc_property_readwrite_weight();
+         log_rule_B("mod_sort_oc_property_reference_weight");
+         int ref_w = options::mod_sort_oc_property_reference_weight();
+         log_rule_B("mod_sort_oc_property_getter_weight");
+         int getter_w = options::mod_sort_oc_property_getter_weight();
+         log_rule_B("mod_sort_oc_property_setter_weight");
+         int setter_w = options::mod_sort_oc_property_setter_weight();
+         log_rule_B("mod_sort_oc_property_nullability_weight");
+         int nullability_w = options::mod_sort_oc_property_nullability_weight();
+
+         //
+         std::multimap<int, std::vector<ChunkGroup> > sorted_chunk_map;
+         sorted_chunk_map.insert(pair<int, std::vector<ChunkGroup> >(class_w, class_chunks));
+         sorted_chunk_map.insert(pair<int, std::vector<ChunkGroup> >(thread_w, thread_chunks));
+         sorted_chunk_map.insert(pair<int, std::vector<ChunkGroup> >(readwrite_w, readwrite_chunks));
+         sorted_chunk_map.insert(pair<int, std::vector<ChunkGroup> >(ref_w, ref_chunks));
+         sorted_chunk_map.insert(pair<int, std::vector<ChunkGroup> >(getter_w, getter_chunks));
+         sorted_chunk_map.insert(pair<int, std::vector<ChunkGroup> >(setter_w, setter_chunks));
+         sorted_chunk_map.insert(pair<int, std::vector<ChunkGroup> >(nullability_w, nullability_chunks));
+         sorted_chunk_map.insert(pair<int, std::vector<ChunkGroup> >(std::numeric_limits<int>::min(), other_chunks));
+
+         Chunk *curr_chunk = open_paren;
+
+         for (multimap<int, std::vector<ChunkGroup> >::reverse_iterator it = sorted_chunk_map.rbegin(); it != sorted_chunk_map.rend(); ++it)
+         {
+            std::vector<ChunkGroup> chunk_groups = (*it).second;
+
+            for (const auto &chunk_group : chunk_groups)
+            {
+               for (auto chunk : chunk_group)
+               {
+                  chunk->SetOrigPrevSp(0);
+
+                  if (chunk != curr_chunk)
+                  {
+                     chunk->MoveAfter(curr_chunk);
+                     curr_chunk = chunk;
+                  }
+                  else
+                  {
+                     curr_chunk = curr_chunk->GetNext();
+                  }
+               }
+
+               // add the parenthesis
+               Chunk endchunk;
+               endchunk.SetType(E_Token::CT_COMMA);
+               endchunk.SetParentType(curr_chunk->GetParentType());
+               endchunk.Text() = ",";
+               endchunk.SetLevel(curr_chunk->GetLevel());
+               endchunk.SetPpLevel(curr_chunk->GetPpLevel());
+               endchunk.SetBraceLevel(curr_chunk->GetBraceLevel());
+               endchunk.SetOrigLine(curr_chunk->GetOrigLine());
+               endchunk.SetOrigCol(curr_chunk->GetOrigCol());
+               endchunk.SetColumn(curr_chunk->GetOrigColEnd() + 1);
+               endchunk.SetFlags(curr_chunk->GetFlags() & PCF_COPY_FLAGS);
+               endchunk.CopyAndAddAfter(curr_chunk);
+               curr_chunk = curr_chunk->GetNext();
+            }
+         }
+
+         // Remove the extra comma's that we did not move
+         while (  curr_chunk->IsNotNullChunk()
+               && curr_chunk->IsNot(E_Token::CT_PAREN_CLOSE))
+         {
+            Chunk *rm_chunk = curr_chunk;
+            curr_chunk = curr_chunk->GetNext();
+            Chunk::Delete(rm_chunk);
+         }
+      }
+   }
+   Chunk *tmp = os->GetNextNcNnl();
+
+   if (tmp->IsParenOpen())
+   {
+      tmp = tmp->GetClosingParen()->GetNextNcNnl();
+   }
+   fix_variable_definition(tmp);
+} // handle_oc_property_decl
+
+
+static void handle_cs_square_stmt(Chunk *os)
+{
+   LOG_FUNC_ENTRY();
+
+   Chunk *cs = os->GetNext();
+
+   while (  cs->IsNotNullChunk()
+         && cs->GetLevel() > os->GetLevel())
+   {
+      cs = cs->GetNext();
+   }
+
+   if (  cs->IsNullChunk()
+      || cs->IsNot(E_Token::CT_SQUARE_CLOSE))
+   {
+      return;
+   }
+   os->SetParentType(E_Token::CT_CS_SQ_STMT);
+   cs->SetParentType(E_Token::CT_CS_SQ_STMT);
+
+   Chunk *tmp;
+
+   for (tmp = os->GetNext(); tmp != cs; tmp = tmp->GetNext())
+   {
+      tmp->SetParentType(E_Token::CT_CS_SQ_STMT);
+
+      if (tmp->Is(E_Token::CT_COLON))
+      {
+         tmp->SetType(E_Token::CT_CS_SQ_COLON);
+      }
+   }
+
+   tmp = cs->GetNextNcNnl();
+
+   if (tmp->IsNotNullChunk())
+   {
+      tmp->SetFlagBits(PCF_STMT_START | PCF_EXPR_START);
+      log_ruleStart("start statement/ expression", tmp);
+   }
+} // handle_cs_square_stmt
+
+
+static void handle_cs_property(Chunk *bro)
+{
+   LOG_FUNC_ENTRY();
+
+   set_paren_parent(bro, E_Token::CT_CS_PROPERTY);
+
+   bool  did_prop = false;
+   Chunk *pc      = bro;
+
+   while ((pc = pc->GetPrevNcNnlNi())->IsNotNullChunk()) // Issue #2279
+   {
+      if (pc->GetLevel() == bro->GetLevel())
+      {
+         //prevent scanning back past 'new' in expressions like new List<int> {1,2,3}
+         // Issue # 1620, UNI-24090.cs
+         if (pc->Is(E_Token::CT_NEW))
+         {
+            break;
+         }
+
+         if (  !did_prop
+            && (  pc->Is(E_Token::CT_WORD)
+               || pc->Is(E_Token::CT_THIS)))
+         {
+            pc->SetType(E_Token::CT_CS_PROPERTY);
+            did_prop = true;
+         }
+         else
+         {
+            pc->SetParentType(E_Token::CT_CS_PROPERTY);
+            make_type(pc);
+         }
+
+         if (pc->TestFlags(PCF_STMT_START))
+         {
+            break;
+         }
+      }
+   }
+}
+
+
+static void handle_cs_array_type(Chunk *pc)
+{
+   if (pc->IsNullChunk())
+   {
+      return;
+   }
+   Chunk *prev = pc->GetPrev();
+
+   for ( ;
+         prev->Is(E_Token::CT_COMMA);
+         prev = prev->GetPrev())
+   {
+      // empty
+   }
+
+   if (prev->Is(E_Token::CT_SQUARE_OPEN))
+   {
+      while (pc != prev)
+      {
+         pc->SetParentType(E_Token::CT_TYPE);
+         pc = pc->GetPrev();
+      }
+      prev->SetParentType(E_Token::CT_TYPE);
+   }
+}
+
+
+static void handle_wrap(Chunk *pc)
+{
+   LOG_FUNC_ENTRY();
+   Chunk *opp  = pc->GetNext();
+   Chunk *name = opp->GetNext();
+   Chunk *clp  = name->GetNext();
+
+   log_rule_B("sp_func_call_paren");
+   log_rule_B("sp_cpp_cast_paren");
+   iarf_e pav = pc->Is(E_Token::CT_FUNC_WRAP) ?
+                options::sp_func_call_paren() :
+                options::sp_cpp_cast_paren();
+
+   log_rule_B("sp_inside_fparen");
+   log_rule_B("sp_inside_paren_cast");
+   iarf_e av = pc->Is(E_Token::CT_FUNC_WRAP) ?
+               options::sp_inside_fparen() :
+               options::sp_inside_paren_cast();
+
+   if (  clp->Is(E_Token::CT_PAREN_CLOSE)
+      && opp->Is(E_Token::CT_PAREN_OPEN)
+      && (  name->Is(E_Token::CT_WORD)
+         || name->Is(E_Token::CT_TYPE)))
+   {
+      const char *psp = (pav & IARF_ADD) ? " " : "";
+      const char *fsp = (av & IARF_ADD) ? " " : "";
+
+      pc->Text().append(psp);
+      pc->Text().append("(");
+      pc->Text().append(fsp);
+      pc->Text().append(name->GetText());
+      pc->Text().append(fsp);
+      pc->Text().append(")");
+
+      pc->SetType(pc->Is(E_Token::CT_FUNC_WRAP) ? E_Token::CT_FUNCTION : E_Token::CT_TYPE);
+
+      pc->SetOrigColEnd(pc->GetOrigCol() + pc->Len());
+
+      Chunk::Delete(opp);
+      Chunk::Delete(name);
+      Chunk::Delete(clp);
+   }
+} // handle_wrap
+
+
+static void handle_proto_wrap(Chunk *pc)
+{
+   LOG_FUNC_ENTRY();
+   Chunk       *opp  = pc->GetNextNcNnl();
+   Chunk       *name = opp->GetNextNcNnl();
+   Chunk       *tmp  = name->GetNextNcNnl()->GetNextNcNnl();
+   Chunk       *clp  = opp->GetClosingParen();
+   Chunk const *cma  = clp->GetNextNcNnl();
+
+   if (  opp->IsNullChunk()
+      || name->IsNullChunk()
+      || tmp->IsNullChunk()
+      || clp->IsNullChunk()
+      || cma->IsNullChunk()
+      || (  name->IsNot(E_Token::CT_WORD)
+         && name->IsNot(E_Token::CT_TYPE))
+      || opp->IsNot(E_Token::CT_PAREN_OPEN))
+   {
+      return;
+   }
+
+   if (cma->Is(E_Token::CT_SEMICOLON))
+   {
+      pc->SetType(E_Token::CT_FUNC_PROTO);
+   }
+   else if (cma->Is(E_Token::CT_BRACE_OPEN))
+   {
+      LOG_FMT(LFCN, "%s(%d): (19) SET TO E_Token::CT_FUNC_DEF: orig line is %zu, orig col is %zu, text '%s'\n",
+              __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol(), pc->GetLogText());
+      pc->SetType(E_Token::CT_FUNC_DEF);
+   }
+   else
+   {
+      return;
+   }
+   opp->SetParentType(pc->GetType());
+   clp->SetParentType(pc->GetType());
+
+   tmp->SetParentType(E_Token::CT_PROTO_WRAP);
+
+   if (tmp->Is(E_Token::CT_PAREN_OPEN))
+   {
+      fix_fcn_def_params(tmp);
+   }
+   else
+   {
+      fix_fcn_def_params(opp);
+      name->SetType(E_Token::CT_WORD);
+   }
+   tmp = tmp->GetClosingParen();
+
+   if (tmp->IsNotNullChunk())
+   {
+      tmp->SetParentType(E_Token::CT_PROTO_WRAP);
+   }
+   // Mark return type (TODO: move to own function)
+   tmp = pc;
+
+   while ((tmp = tmp->GetPrevNcNnlNi())->IsNotNullChunk()) // Issue #2279
+   {
+      if (  !tmp->IsTypeDefinition()
+         && tmp->IsNot(E_Token::CT_OPERATOR)
+         && tmp->IsNot(E_Token::CT_WORD)
+         && tmp->IsNot(E_Token::CT_ADDR))
+      {
+         break;
+      }
+      tmp->SetParentType(pc->GetType());
+      make_type(tmp);
+   }
+} // handle_proto_wrap
+
+
+/**
+ * Java assert statements are: "assert EXP1 [: EXP2] ;"
+ * Mark the parent of the colon and semicolon
+ */
+static void handle_java_assert(Chunk *pc)
+{
+   LOG_FUNC_ENTRY();
+   bool  did_colon = false;
+   Chunk *tmp      = pc;
+
+   while ((tmp = tmp->GetNext())->IsNotNullChunk())
+   {
+      if (tmp->GetLevel() == pc->GetLevel())
+      {
+         if (  !did_colon
+            && tmp->Is(E_Token::CT_COLON))
+         {
+            did_colon = true;
+            tmp->SetParentType(pc->GetType());
+         }
+
+         if (tmp->Is(E_Token::CT_SEMICOLON))
+         {
+            tmp->SetParentType(pc->GetType());
+            break;
+         }
+      }
+   }
+} // handle_java_assert
+
+
+/**
+ * Check if a '&' or '&&' token is in a function reference qualifier context.
+ */
+static bool is_function_ref_qualifier_context(Chunk const *pc)
+{
+   if (!language_is_set(lang_flag_e::LANG_CPP))
+   {
+      return(false);
+   }
+
+   // If we're inside any parentheses, this cannot be a ref-qualifier.
+   if (pc->GetLevel() > pc->GetBraceLevel())
+   {
+      return(false);
+   }
+   // Look backwards to find function signature pattern
+   Chunk const *prev = pc->GetPrevNcNnlNi();
+
+   // Skip over const, noexcept, constexpr, static, etc.
+   while (  prev->IsNotNullChunk()
+         && (  prev->Is(E_Token::CT_QUALIFIER)
+            || prev->Is(E_Token::CT_NOEXCEPT)
+            || prev->IsString("noexcept")
+            || prev->IsString("const")
+            || prev->IsString("constexpr")
+            || prev->IsString("static")
+            || prev->IsString("volatile")))
+   {
+      prev = prev->GetPrevNcNnlNi();
+   }
+
+   // Should find closing parenthesis of parameter list
+   // Note: For conversion operators the paren might still be E_Token::CT_PAREN_CLOSE
+   // instead of E_Token::CT_FPAREN_CLOSE at this stage of processing
+   if (  prev->IsNullChunk()
+      || (  !prev->Is(E_Token::CT_FPAREN_CLOSE)
+         && !prev->Is(E_Token::CT_PAREN_CLOSE)))
+   {
+      return(false);
+   }
+   // Find matching opening parenthesis
+   Chunk const *paren_open = prev->GetOpeningParen();
+
+   if (paren_open->IsNullChunk())
+   {
+      return(false);
+   }
+   // Find function name before opening parenthesis
+   Chunk *func_name = paren_open->GetPrevNcNnlNi();
+
+   if (func_name->IsNullChunk())
+   {
+      return(false);
+   }
+
+   // Check if this looks like a function signature
+   // We look for function types or words that could be function names
+   if (  func_name->Is(E_Token::CT_FUNC_DEF)
+      || func_name->Is(E_Token::CT_FUNC_PROTO)
+      || func_name->Is(E_Token::CT_FUNC_CLASS_DEF)
+      || func_name->Is(E_Token::CT_FUNC_CLASS_PROTO)
+      || func_name->Is(E_Token::CT_WORD)
+      || func_name->Is(E_Token::CT_FUNCTION))
+   {
+      return(true);
+   }
+
+   // Handle member function pointer type in using/typedef declarations:
+   // Patterns:
+   //   using MFP = Type (Class::*)(Args) const &&;
+   //   using MFPArray = Type (Class::*[N])(Args) &&;
+   //   typedef Type (Class::*MfpTypedef)(Args) &&;
+   // The pattern before paren is: (Class::*...) - func_name is CT_PAREN_CLOSE or CT_FPAREN_CLOSE
+   if (  func_name->Is(E_Token::CT_PAREN_CLOSE)
+      || func_name->Is(E_Token::CT_FPAREN_CLOSE))
+   {
+      Chunk const *inner_open = func_name->GetOpeningParen();
+
+      if (inner_open->IsNotNullChunk())
+      {
+         // Look inside for adjacent ::* pattern (member pointer declaration).
+         // We check for DC_MEMBER immediately followed by STAR/PTR_TYPE one level
+         // deeper than the opening paren to avoid matching nested ::* patterns
+         size_t target_level = inner_open->GetLevel() + 1;
+
+         for (Chunk const *inner = inner_open->GetNext(); inner != func_name && inner->IsNotNullChunk(); inner = inner->GetNext())
+         {
+            if (  inner->Is(E_Token::CT_DC_MEMBER)
+               && inner->GetLevel() == target_level)
+            {
+               Chunk const *after_dc_member = inner->GetNext();
+
+               if (  after_dc_member->IsNotNullChunk()
+                  && after_dc_member != func_name
+                  && (  after_dc_member->Is(E_Token::CT_STAR)
+                     || after_dc_member->Is(E_Token::CT_PTR_TYPE)))
+               {
+                  LOG_FMT(LFCNR, "%s(%d): found member function pointer ref-qualifier at orig line %zu, orig col %zu\n",
+                          __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+                  return(true);
+               }
+            }
+         }
+      }
+   }
+
+   // Handle out-of-class function definitions: ClassName::funcName() &&
+   // The function name may be classified as E_Token::CT_FUNC_CALL, but we need to verify
+   // the context to distinguish from actual function calls
+   if (func_name->Is(E_Token::CT_FUNC_CALL))
+   {
+      // Check if this looks like a declaration/definition context by seeing what follows the && token
+      Chunk const *next = pc->GetNextNcNnl();
+
+      // Skip over any trailing parts: const, noexcept, override, final, etc.
+      while (  next->IsNotNullChunk()
+            && (  next->Is(E_Token::CT_QUALIFIER)
+               || next->Is(E_Token::CT_NOEXCEPT)
+               || (  next->Is(E_Token::CT_PAREN_OPEN)
+                  && next->GetPrevNcNnl()->Is(E_Token::CT_NOEXCEPT))))
+      {
+         if (next->Is(E_Token::CT_PAREN_OPEN))
+         {
+            // Skip to matching paren close
+            next = next->GetClosingParen();
+
+            if (next->IsNullChunk())
+            {
+               break;
+            }
+         }
+         next = next->GetNextNcNnl();
+      }
+
+      // If we find semicolon, this is a declaration (could be class member)
+      // If we find {, this is a function definition (could be class member)
+      // If we find = delete/default, this is a declaration
+      // If we find -> this is a trailing return type
+      // Otherwise, it's likely an expression context
+      if (  next->Is(E_Token::CT_SEMICOLON)
+         || next->Is(E_Token::CT_BRACE_OPEN)
+         || next->Is(E_Token::CT_ASSIGN)      // = delete, = default, = 0
+         || next->Is(E_Token::CT_TRAILING_RET)
+         || (  next->Is(E_Token::CT_MEMBER)
+            && next->IsString("->")))  // trailing return arrow
+      {
+         return(true);
+      }
+      // Plain function call like func() && ... - not a ref-qualifier context
+      return(false);
+   }
+
+   // Handle conversion operators: operator Type&&() &&
+   // Walk back to check for E_Token::CT_OPERATOR keyword
+   if (  func_name->Is(E_Token::CT_BYREF)
+      || func_name->Is(E_Token::CT_BOOL)
+      || func_name->Is(E_Token::CT_TYPE)
+      || func_name->Is(E_Token::CT_WORD)
+      || func_name->Is(E_Token::CT_OPERATOR_VAL)
+      || func_name->Is(E_Token::CT_PARAMETER_PACK)
+      || func_name->Is(E_Token::CT_ARITH)      // Could be & that wasn't converted yet
+      || func_name->Is(E_Token::CT_AMP)        // Could be & that wasn't converted yet
+      || func_name->Is(E_Token::CT_FUNC_CALL)) // Type may be classified as func call
+   {
+      Chunk const *tmp = func_name;
+
+      while (tmp->IsNotNullChunk())
+      {
+         if (tmp->Is(E_Token::CT_OPERATOR))
+         {
+            // Found operator keyword - this is a conversion operator
+            LOG_FMT(LFCNR, "%s(%d): found conversion operator context at orig line %zu, orig col %zu\n",
+                    __func__, __LINE__, pc->GetOrigLine(), pc->GetOrigCol());
+            return(true);
+         }
+
+         // Continue walking back through valid conversion operator tokens
+         if (  tmp->Is(E_Token::CT_TYPE)
+            || tmp->Is(E_Token::CT_WORD)
+            || tmp->Is(E_Token::CT_OPERATOR_VAL)
+            || tmp->Is(E_Token::CT_DC_MEMBER)       // ::
+            || tmp->Is(E_Token::CT_QUALIFIER)       // const
+            || tmp->Is(E_Token::CT_PARAMETER_PACK)  // T in template
+            || tmp->Is(E_Token::CT_ANGLE_CLOSE)     // end of template args
+            || tmp->Is(E_Token::CT_ANGLE_OPEN)      // start of template args
+            || tmp->Is(E_Token::CT_COMMA)           // template arg separator
+            || tmp->Is(E_Token::CT_BYREF)           // rvalue ref in return type
+            || tmp->Is(E_Token::CT_BOOL)            // && not yet converted
+            || tmp->Is(E_Token::CT_ARITH)           // & not yet converted
+            || tmp->Is(E_Token::CT_AMP)             // & not yet converted
+            || tmp->Is(E_Token::CT_FUNC_CALL))      // type may be classified as func call
+         {
+            tmp = tmp->GetPrevNcNnlNi();
+            continue;
+         }
+         // Stop if we hit something that's not part of a conversion operator
+         break;
+      }
+   }
+   return(false);
+} // is_function_ref_qualifier_context

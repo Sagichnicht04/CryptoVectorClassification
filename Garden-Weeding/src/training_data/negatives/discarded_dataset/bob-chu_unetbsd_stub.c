@@ -1,0 +1,1568 @@
+#include <sys/param.h>
+#include <sys/module.h>
+#include <sys/cprng.h>
+#include <sys/systm.h>
+#include <sys/percpu.h>
+#include <sys/once.h>
+#include <sys/thmap.h>
+
+#include <sys/kernel.h>
+#include <sys/xcall.h>
+#include <sys/filedesc.h>
+#include <sys/proc.h>
+#include <sys/device.h>
+#include <sys/kauth.h>
+#include <sys/buf.h>
+#include <sys/acct.h>
+#include <sys/wait.h>
+#include <sys/file.h>
+#include <sys/mbuf.h>
+#include <ufs/ufs/quota.h>
+#include <sys/uio.h>
+#include <sys/ioctl.h>
+#include <sys/protosw.h>
+#include <sys/domain.h>
+#include <sys/signalvar.h>
+#include <sys/socket.h>
+#include <sys/socketvar.h>
+#include <sys/mutex.h>
+
+#include <net/if.h>
+#include <net/if_dl.h>
+#include <net/if_stats.h>
+#include <netinet/in.h>
+
+#include "u_pktqueue.h"
+
+
+struct cpu_info cpu0 = {0};
+struct lwp	*curlwp;
+
+// DISABLED: This macro prevents curlwp initialization, causing NULL pointer crash in sobind()
+#if 0
+#ifdef curlwp
+#undef curlwp
+#endif
+#define curlwp stub_curlwp()
+#endif
+/*
+ * sys/kern/uipc_mbuf.c global variable
+ */
+
+const int msize = 512;
+const int mclbytes = 2048;
+
+#define PHYSMEM_MB 4096
+#define PAGE_SIZE_VAL 4096
+unsigned long physmem = (PHYSMEM_MB * 1024 * 1024) / PAGE_SIZE_VAL;
+unsigned long nkmempages = (PHYSMEM_MB * 1024 * 1024 / 2) / PAGE_SIZE_VAL;
+
+int nmbclusters = 524288;
+int mblowat = 256;
+int mcllowat = 64;
+
+
+/*
+ * time related
+ */
+time_t time_update = 0;
+volatile struct	timeval my_time;
+volatile time_t time__uptime;
+volatile time_t time__second;
+
+extern void exit(int) __attribute__ ((__noreturn__));
+extern int gettimeofday(struct timeval *, void*);
+
+/*
+ * Copy string src to buffer dst of size dsize.  At most dsize-1
+ * chars will be copied.  Always NUL terminates (unless dsize == 0).
+ * Returns strlen(src); if retval >= dsize, truncation occurred.
+ */
+size_t
+strlcpy(char * __restrict dst, const char * __restrict src, size_t dsize)
+{
+	const char *osrc = src;
+	size_t nleft = dsize;
+
+	/* Copy as many bytes as will fit. */
+	if (nleft != 0) {
+		while (--nleft != 0) {
+			if ((*dst++ = *src++) == '\0')
+				break;
+		}
+	}
+
+	/* Not enough room in dst, add NUL and traverse rest of src. */
+	if (nleft == 0) {
+		if (dsize != 0)
+			*dst = '\0';		/* NUL-terminate dst */
+		while (*src++)
+			;
+	}
+
+	return(src - osrc - 1);	/* count does not include NUL */
+}
+
+/*
+ * Appends src to string dst of size siz (unlike strncat, siz is the
+ * full size of dst, not space left).  At most siz-1 characters
+ * will be copied.  Always NUL terminates (unless siz <= strlen(dst)).
+ * Returns strlen(src) + MIN(siz, strlen(initial dst)).
+ * If retval >= siz, truncation occurred.
+ */
+size_t
+strlcat(char *dst, const char *src, size_t siz)
+{
+	char *d = dst;
+	const char *s = src;
+	size_t n = siz;
+	size_t dlen;
+
+	/* Find the end of dst and adjust bytes left but don't go past end */
+	while (n-- != 0 && *d != '\0')
+		d++;
+	dlen = d - dst;
+	n = siz - dlen;
+
+	if (n == 0)
+		return(dlen + strlen(s));
+	while (*s != '\0') {
+		if (n != 1) {
+			*d++ = *s;
+			n--;
+		}
+		s++;
+	}
+	*d = '\0';
+
+	return(dlen + (s - src));	/* count does not include NUL */
+}
+
+
+int splraise(int ipl) {
+    return 0;  /* No interrupt levels in user space */
+}
+
+int splimp(void)
+{
+	// FIXME
+	return 5;
+}
+
+void splx(int x)
+{
+	// FIXME
+}
+
+int subyte(void *base, int byte)
+{
+	return 0;
+}
+
+int suibyte(void *base, int byte)
+{
+	return 0;
+}
+
+void microtime(tvp)
+	register struct timeval *tvp;
+{
+	gettimeofday(tvp, NULL);
+}
+
+void init_time(void)
+{
+    struct timeval local_time;
+    gettimeofday(&local_time, NULL);
+    time_update = local_time.tv_sec;
+}
+
+void tick_update(void)
+{
+    my_time.tv_usec += tick;
+    if (my_time.tv_usec >= 1000000) {
+        my_time.tv_usec -= 1000000;
+        my_time.tv_sec += 1;
+        time_update += 1;
+    }
+}
+
+int getticks(void) { return tick; }
+
+void nanotime(struct timespec *ts) { 
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    ts->tv_sec = tv.tv_sec;
+    ts->tv_nsec = tv.tv_usec * 1000;
+}
+void getnanotime(struct timespec *tsp) { 
+    nanotime(tsp);
+}
+void getmicrouptime(struct timeval *tv) { 
+    gettimeofday(tv, NULL);
+}
+
+
+void ovbcopy(const void *src, void *dest, size_t n)
+{
+	bcopy(src, dest, n);
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// sys/conf/param.c
+//////////////////////////////////////////////////////////////////////////////
+#undef curproc
+#define HZ 100
+int hz = HZ;
+int tick = 1000000 / HZ;
+typedef struct kauth_cred *kauth_cred_t;
+//struct kauth_cred cred_l;
+//kauth_cred_t cred0 = NULL;
+//struct	ucred ucred0;
+extern kauth_cred_t cred0;
+
+//extern struct proc proc0;
+struct session session0 = {
+	.s_count = 1,
+	.s_sid = 0,
+};
+
+struct pgrp pgrp0 = {
+	.pg_members = LIST_HEAD_INITIALIZER(&pgrp0.pg_members),
+	.pg_session = &session0,
+};
+filedesc_t filedesc0;
+
+struct plimit limit0;
+struct pstats pstat0;
+struct vmspace vmspace0;
+struct sigacts sigacts0;
+struct proc proc0 = {
+	.p_lwps = LIST_HEAD_INITIALIZER(&proc0.p_lwps),
+	.p_sigwaiters = LIST_HEAD_INITIALIZER(&proc0.p_sigwaiters),
+	.p_nlwps = 1,
+	.p_nrlwps = 1,
+	.p_pgrp = &pgrp0,
+	.p_comm = "system",
+	/*
+	 * Set P_NOCLDWAIT so that kernel threads are reparented to init(8)
+	 * when they exit.  init(8) can easily wait them out for us.
+	 */
+	.p_flag = PK_SYSTEM | PK_NOCLDWAIT,
+	.p_stat = SACTIVE,
+	.p_nice = NZERO,
+	//.p_emul = &emul_netbsd,
+	//.p_cwdi = &cwdi0,
+	.p_limit = &limit0,
+	.p_fd = &filedesc0,
+	.p_vmspace = &vmspace0,
+	.p_stats = &pstat0,
+	.p_sigacts = &sigacts0,
+#ifdef PROC0_MD_INITIALIZERS
+	PROC0_MD_INITIALIZERS
+#endif
+};
+
+struct proclist allproc;
+
+//extern struct lwp dummy_lwp;
+struct lwp lwp0 = {
+	.l_lid = 0,
+	.l_proc = &proc0,
+        .l_cpu = &cpu0,
+};
+
+
+lwp_t *gl_lwp;
+struct proc dummy_proc = {0};
+extern struct proc *curproc;
+
+// Thread-local storage for curlwp (used by x86_curlwp in cpu.h)
+__thread struct lwp *__curlwp_tls = &lwp0;
+
+__attribute__((constructor)) void init_dummy_lwp() {
+    gl_lwp = &lwp0;
+    __curlwp_tls = &lwp0;  // Initialize TLS curlwp for all threads
+}
+
+static inline lwp_t * __attribute__ ((const)) stub_curlwp(void) { return &lwp0; }
+/////////////////////////////////////////////////////////////////////////////
+// sys/i386/i386/machdep.c
+//////////////////////////////////////////////////////////////////////////////
+bool cpu_intr_p(void) {
+    return false;  /* Not in interrupt context */
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// sys/i386/i386/trap.c
+//////////////////////////////////////////////////////////////////////////////
+int
+copyout(const void *from, void *to, size_t len)
+{
+	if (from == NULL || to == NULL) {
+		printf("copyout: Invalid pointer detected - from=%p, to=%p, len=%zu\n", from, to, len);
+		return EFAULT;
+	}
+	bcopy(from, to, len);
+	return 0;
+}
+
+int
+copyin(const void *from, void *to, size_t len)
+{
+	if (from == NULL || to == NULL) {
+		printf("copyin: Invalid pointer detected - from=%p, to=%p, len=%zu\n", from, to, len);
+		return EFAULT;
+	}
+	bcopy(from, to, len);
+	return 0;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// sys/kern/kern_clock.c
+//////////////////////////////////////////////////////////////////////////////
+/*
+ * timeout --
+ *	Execute a function after a specified length of time.
+ *
+ * untimeout --
+ *	Cancel previous timeout function call.
+ *
+ *	See AT&T BCI Driver Reference Manual for specification.  This
+ *	implementation differs from that one in that no identification
+ *	value is returned from timeout, rather, the original arguments
+ *	to timeout are used to identify entries for untimeout.
+ */
+
+void
+timeout(ftn, arg, ticks)
+	void (*ftn) __P((void *));
+	void *arg;
+	register int ticks;
+{
+	// FIXME
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// sys/kern/kern_malloc.c
+//////////////////////////////////////////////////////////////////////////////
+#include "u_mem.h"
+
+/*
+ * Allocate a block of memory
+ */
+void *
+xmalloc(size, type, flags)
+	unsigned long size;
+	int type, flags;
+{
+	// mbuf requires 128-byte alignment
+    void *ptr;
+    if (type == M_MBUF || type == M_EXT_CLUSTER) {
+        ptr = memalign(128, size);
+        if (ptr == NULL) {
+            
+            return NULL;
+        }
+        memset(ptr, 0, size);
+        
+        return ptr;
+    } else {
+        ptr = malloc(size);
+        if (ptr == NULL) {
+            
+            return NULL;
+        }
+        memset(ptr, 0, size);
+        
+        return ptr;
+    }
+}
+
+/*
+ * Free a block of memory allocated by malloc.
+ */
+void
+xfree(addr, type)
+	void *addr;
+	int type;
+{
+    if (addr != NULL) {
+        
+        free(addr);
+    } else {
+        
+    }
+}
+
+void *kern_malloc(unsigned long reqsize, int flags)
+{
+    void *ptr = malloc(reqsize);
+    memset(ptr, 0, reqsize);
+    return ptr;
+    //return calloc(reqsize, sizeof(char));
+}
+void kern_free(void *addr) { free(addr); }
+
+//////////////////////////////////////////////////////////////////////////////
+// sys/kern/kern_prot.c
+//////////////////////////////////////////////////////////////////////////////
+/*
+ * Test whether the specified credentials imply "super-user"
+ * privilege; if so, and we have accounting info, set the flag
+ * indicating use of super-powers.
+ * Returns 0 or error.
+ */
+#if 0
+int
+suser(cred, acflag)
+	struct ucred *cred;
+	u_short *acflag;
+{
+	if (cred->cr_uid == 0) {
+		if (acflag)
+			*acflag |= ASU;
+		return (0);
+	}
+	return (EPERM);
+}
+#endif
+//////////////////////////////////////////////////////////////////////////////
+// sys/kern/kern_synch.c
+//////////////////////////////////////////////////////////////////////////////
+/*
+ * General sleep call.  Suspends the current process until a wakeup is
+ * performed on the specified identifier.  The process will then be made
+ * runnable with the specified priority.  Sleeps at most timo/hz seconds
+ * (0 means no timeout).  If pri includes PCATCH flag, signals are checked
+ * before and after sleeping, else signals are not checked.  Returns 0 if
+ * awakened, EWOULDBLOCK if the timeout expires.  If PCATCH is set and a
+ * signal needs to be delivered, ERESTART is returned if the current system
+ * call should be restarted if possible, and EINTR is returned if the system
+ * call should be interrupted by the signal (return EINTR).
+ */
+int
+tsleep(ident, priority, wmesg, timo)
+	wchan_t ident;
+	pri_t priority;
+        int timo;
+	const char *wmesg;
+{
+	printf("tsleep\n");
+	exit(1);
+	return 0;
+}
+
+/*
+ * Make all processes sleeping on the specified identifier runnable.
+ */
+void
+wakeup(ident)
+	wchan_t ident;
+{
+	// FIXME
+}
+
+#if 0
+//////////////////////////////////////////////////////////////////////////////
+// sys/kern/kern_sysctl.c
+//////////////////////////////////////////////////////////////////////////////
+/*
+ * Validate parameters and get old / set new parameters
+ * for an integer-valued sysctl function.
+ */
+int
+sysctl_int(oldp, oldlenp, newp, newlen, valp)
+	void *oldp;
+	size_t *oldlenp;
+	void *newp;
+	size_t newlen;
+	int *valp;
+{
+	int error = 0;
+
+	if (oldp && *oldlenp < sizeof(int))
+		return (ENOMEM);
+	if (newp && newlen != sizeof(int))
+		return (EINVAL);
+	*oldlenp = sizeof(int);
+	if (oldp)
+		error = copyout(valp, oldp, sizeof(int));
+	if (error == 0 && newp)
+		error = copyin(newp, valp, sizeof(int));
+	return (error);
+}
+
+void
+sysctl_unlock(void)
+{
+}
+void
+sysctl_relock(void)
+{
+}
+#endif
+
+
+//////////////////////////////////////////////////////////////////////////////
+// sys/kern/subr_prf.c
+//////////////////////////////////////////////////////////////////////////////
+void panic(const char *fmt, ...)
+{
+    printf("panic: ");
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    printf("\n");
+
+    // For userspace debugging, don't exit immediately; allow logging or debugging
+    printf("Panic encountered. Continuing for debugging (userspace mode).\n");
+    // Uncomment the line below to exit on panic if desired
+    //exit(1);
+    abort();
+}
+
+/*
+ * Log writes to the log buffer, and guarantees not to sleep (so can be
+ * called by interrupt routines).  If there is no process reading the
+ * log yet, it writes to the console also.
+ */
+void log(int level, const char *fmt, ...)
+{
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    printf("\n");
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// sys/kern/subr_proc.c
+//////////////////////////////////////////////////////////////////////////////
+/*
+ * Other process lists
+ */
+#if 0
+struct pidhashhead *pidhashtbl;
+u_long pidhash;
+
+/*
+ * Locate a process by number
+ */
+struct proc *
+pfind(pid)
+	register pid_t pid;
+{
+	register struct proc *p;
+
+	for (p = PIDHASH(pid)->lh_first; p != 0; p = p->p_hash.le_next)
+		if (p->p_pid == pid)
+			return (p);
+	return (NULL);
+}
+#endif
+//////////////////////////////////////////////////////////////////////////////
+// sys/kern/sys_generic.c
+//////////////////////////////////////////////////////////////////////////////
+/*
+ * Do a wakeup when a selectable event occurs.
+ */
+void
+selwakeup(sip)
+	register struct selinfo *sip;
+{
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// sys/kern/uipc_syscalls.c
+//////////////////////////////////////////////////////////////////////////////
+int
+sockargs(mp, buf, buflen, seg, type)
+	struct mbuf **mp;
+	const void *buf;
+	size_t buflen;
+        enum uio_seg seg;
+        int type;
+{
+	register struct sockaddr *sa;
+	register struct mbuf *m;
+	int error;
+
+	if ((u_int)buflen > MLEN) {
+#ifdef COMPAT_OLDSOCK
+		if (type == MT_SONAME && (u_int)buflen <= 112)
+			buflen = MLEN;		/* unix domain compat. hack */
+		else
+#endif
+		return (EINVAL);
+	}
+	m = m_get(M_WAIT, type);
+	if (m == NULL)
+		return (ENOBUFS);
+	m->m_len = buflen;
+	error = copyin(buf, mtod(m, void *), (u_int)buflen);
+	if (error) {
+		(void) m_free(m);
+		return (error);
+	}
+	*mp = m;
+	if (type == MT_SONAME) {
+		sa = mtod(m, struct sockaddr *);
+
+#if defined(COMPAT_OLDSOCK) && BYTE_ORDER != BIG_ENDIAN
+		if (sa->sa_family == 0 && sa->sa_len < AF_MAX)
+			sa->sa_family = sa->sa_len;
+#endif
+		sa->sa_len = buflen;
+	}
+	return (0);
+}
+
+
+/*
+ * sys/kern/kern_proc.c *
+ */
+
+bool
+get_expose_address(struct proc *p)
+{
+    return true;
+}
+
+
+
+struct pgrp *pgrp_find(pid_t pgid) { return NULL; }
+
+#if 1
+/*
+ * sys/kern/subr_percpu.c
+ */
+
+struct percpu {
+    void *pc_data; /* Pointer to per-CPU data */
+    size_t pc_size; /* Size of the allocated data */
+    percpu_callback_t pc_ctor; /* Constructor callback */
+    percpu_callback_t pc_dtor; /* Destructor callback */
+    void *pc_cookie; /* Cookie for callbacks */
+    uint8_t reserver[64]; /*reserver 64 */
+};
+typedef struct percpu percpu_t;
+
+percpu_t *cur_percpu = NULL;
+static percpu_t *new_percpu = NULL;
+
+percpu_t *
+percpu_alloc(size_t size)
+{
+    cur_percpu = (percpu_t *)calloc(1, sizeof(percpu_t));
+    if (!cur_percpu) {
+        printf("Failed to allocate memory for percpu structure. Possible out of memory condition.\n");
+        return NULL;
+    }
+    cur_percpu->pc_data = calloc(1, size);
+    if (!cur_percpu->pc_data) {
+        free(cur_percpu);
+        cur_percpu = NULL;
+        printf("Failed to allocate memory for percpu data of size %zu. Possible out of memory condition.\n", size);
+        return NULL;
+    }
+    cur_percpu->pc_size = size;
+    
+    return cur_percpu;
+}
+
+void percpu_free(percpu_t *pc, size_t size)
+{
+    if (pc) {
+        if (pc->pc_data) {
+            free(pc->pc_data);
+            pc->pc_data = NULL;
+        }
+        free(pc);
+        if (pc == cur_percpu) {
+            cur_percpu = NULL;
+        }
+        if (pc == new_percpu) {
+            new_percpu = NULL;
+        }
+        pc = NULL;
+    }
+}
+
+void *
+percpu_getref(percpu_t *pc)
+{
+    return pc ? pc->pc_data : NULL;
+}
+
+void
+percpu_putref(percpu_t *pc)
+{
+    // No-op in user space
+}
+
+void percpu_foreach(percpu_t *pc, percpu_callback_t cb, void *arg) {
+    if (pc && pc->pc_data && cb) {
+        cb(pc->pc_data, arg, &cpu0);
+    } else {
+        printf("percpu_foreach: Invalid pc=%p, pc_data=%p, or cb=%p\n", pc, pc ? pc->pc_data : NULL, cb);
+    }
+}
+
+void percpu_traverse_enter(void) {
+    // No-op in user space
+}
+
+void percpu_traverse_exit(void) {
+    // No-op in user space
+}
+
+percpu_t *percpu_create(size_t size, percpu_callback_t ctor,
+        percpu_callback_t dtor, void *cookie)
+{
+#if 0
+    if (new_percpu != NULL) {
+        percpu_free(new_percpu, new_percpu->pc_size); // Free any previously allocated memory to prevent leaks
+    }
+#endif
+    new_percpu = (percpu_t *)calloc(1, sizeof(percpu_t));
+    if (!new_percpu) {
+        printf("Failed to allocate memory for percpu structure. Possible out of memory condition.\n");
+        return NULL;
+    }
+    new_percpu->pc_data = calloc(1, size);
+    if (!new_percpu->pc_data) {
+        free(new_percpu);
+        new_percpu = NULL;
+        printf("Failed to allocate memory for percpu data of size %zu. Possible out of memory condition.\n", size);
+        return NULL;
+    }
+    new_percpu->pc_size = size;
+    new_percpu->pc_ctor = ctor;
+    new_percpu->pc_dtor = dtor;
+    new_percpu->pc_cookie = cookie;
+    printf("percpu_create: Allocated memory of size %zu at %p (data at %p)\n", size, new_percpu, new_percpu->pc_data);
+    if (ctor) {
+        ctor(new_percpu->pc_data, cookie, &cpu0);
+    }
+    return new_percpu;
+}
+
+void *percpu_getptr_remote(percpu_t *pc, struct cpu_info *ci) {
+    return pc ? pc->pc_data : NULL;
+}
+
+void percpu_foreach_xcall(percpu_t *pc, u_int xcflags, 
+        percpu_callback_t func,
+        void *arg) {
+    if (pc && pc->pc_data && func) {
+        func(pc->pc_data, arg, &cpu0);  // Single CPU simulation
+    } else {
+        printf("percpu_foreach_xcall: Invalid pc=%p, pc_data=%p, or func=%p\n", pc, pc ? pc->pc_data : NULL, func);
+    }
+}
+#endif
+unsigned int xc_encode_ipl(int ipl) {
+    return 0;  // 返回伪造的 IPL
+}
+
+uint64_t
+xc_unicast(unsigned int flags, xcfunc_t func, void *arg1, void *arg2,
+    struct cpu_info *ci)
+{
+    (*func)(arg1, arg2); // 直接调用函数，忽略 CPU 特定逻辑
+    return 0;
+}
+
+vmem_t *
+vmem_xcreate(const char *name, vmem_addr_t base, vmem_size_t size,
+    vmem_size_t quantum, vmem_ximport_t *importfn, vmem_release_t *releasefn,
+    vmem_t *source, vmem_size_t qcache_max, vm_flag_t flags, int ipl)
+{
+    return (vmem_t *)malloc(size);
+}
+// 模拟 explicit_memset
+void *
+explicit_memset(void *ptr, int value, size_t len)
+{
+    
+    return memset(ptr, value, len); // 使用标准 memset
+}
+
+
+struct cpu_info *cpu_lookup(unsigned int cpuid) {
+    return &cpu0;  // 总是返回 cpu0
+}
+
+/* multiple cpu */
+void xc_barrier(unsigned int flags) {}
+
+/*
+ * mutex related
+ */
+kmutex_t proc_lock;
+kmutex_t *mutex_obj_alloc(kmutex_type_t type, int ipl) {
+    return NULL;  /* No real mutex needed */
+}
+
+void mutex_init(kmutex_t *mtx, kmutex_type_t type, int ipl) {
+    /* No-op for stub */
+}
+
+void mutex_enter(kmutex_t *mtx) {
+    /* No-op */
+    //printf("Stub mutex_enter\n");
+}
+int mutex_tryenter(kmutex_t *mtx) { return 1; }
+
+void mutex_exit(kmutex_t *mtx) {
+    /* No-op */
+    //printf("Stub mutex_exit\n");
+}
+
+void mutex_destroy(kmutex_t *mtx) {}
+
+void mutex_obj_hold(kmutex_t *mtx) {}  /* Always held */
+bool mutex_obj_free(kmutex_t *mtx) { return true; }
+int mutex_owned(const kmutex_t *mtx) { return 1; }
+
+void mutex_spin_enter(kmutex_t *mtx) {}
+void mutex_spin_exit(kmutex_t *mtx) {}
+
+/*
+ * rwlock related
+ */
+#include "sys/rwlock.h"  /* For krwlock_t */
+
+//typedef int krwlock_t;  /* Dummy type */
+#define RW_READER 1     /* Stub mode */
+#define RW_WRITER 2     /* Stub mode */
+
+void rw_init(krwlock_t *lock) {
+    /* No-op for stub */
+}
+
+void rw_enter(krwlock_t *lock, const krw_t mode) {
+    /* No-op */
+    //printf("Stub rw_enter\n");
+}
+void rw_exit(krwlock_t *lock) {
+}
+
+krwlock_t *rw_obj_alloc(void) { return NULL; }
+bool rw_obj_free(krwlock_t *lock) { return true; };
+
+int rw_lock_held(krwlock_t *lock) {
+    return 1;  /* Always true in stub; assumes lock is "held" */
+}
+
+int rw_tryenter(krwlock_t *lock, const krw_t  mode) {
+    return 1;  /* Success */
+}
+int rw_read_held(krwlock_t *lock) {
+    return 1;  /* Success */
+}
+int rw_write_held(krwlock_t *lock) {
+    return 1;  /* Success */
+}
+
+
+
+int rw_tryupgrade(krwlock_t *lock) { return 0; }
+
+void rw_destroy(krwlock_t *lock) {
+    /* No-op in stub */
+    //printf("Stub rw_destroy\n");
+}
+
+/*
+ * soft interrupt and wakeup
+ */
+#include "u_softint.h"
+void sleepq_init(void *sq) {}
+
+void sleepq_wake(void *sq, void *wchan, u_int expected, kmutex_t *mtx) {
+    /* No-op */
+}
+int sleepq_enter(void *sq, struct lwp *l, kmutex_t *mtx) { return 0; }
+void sleepq_enqueue(void *sq, const void *wchan, const char *msg, struct syncobj *sync, bool catch) {}
+int sleepq_block(int timo, bool catch, struct syncobj *sync, int sig) { return 0; }  /* Return success */
+void sleepq_unsleep(struct lwp *l, bool cleanup) {}
+void sleepq_remove(void *sq, struct lwp *l, bool cleanup) {}
+void sleepq_changepri(struct lwp *l, int pri) {}
+void sleepq_lendpri(struct lwp *l, int pri) {}
+
+void sigsuspendsetup(struct lwp *l, const sigset_t *mask) {}
+void sigsuspendteardown(struct lwp *l) {}
+
+
+struct wq {
+    int ww_off;
+    int	ww_proto;
+    void *func;
+};
+
+static struct wq wq_data[32];
+static int wq_index = 0;
+
+int workqueue_create(struct workqueue **wq, const char *name, void (*func)(struct work *, void *), void *arg, pri_t pri, int ipl, int flags) {
+    return 0;
+}
+void workqueue_wait(struct workqueue *wq, struct work *arg) {}
+void workqueue_enqueue(struct workqueue *wq, struct work *wk0, struct cpu_info *ci) {}
+void workqueue_destroy(struct workqueue *wq) {}
+void *wqinput_create(const char *name, void (*func)(struct mbuf *, int, int))
+{
+    if (wq_index >= 32) {
+        printf("wq_index > 32.\n");
+        exit(1);
+    }
+    struct wq *w = &wq_data[wq_index++];
+    w->func = func;
+    return w;
+}
+void wqinput_input(struct wqinput *wqi, struct mbuf *m, int off, int proto) {
+    struct wq *w = (struct wq *)wqi;
+    void (*func)(struct mbuf *, int, int);
+    func = w->func;
+    func(m, off, proto);
+}
+
+/*
+ * sys/kern/subr_pool.c
+ */
+int nullop(void* p) { return 0; }
+int ncpu = 1;
+struct cpu_info *cpu_info_list = &cpu0;
+int cold = 0;
+void membar_release(void) {}
+
+/*
+ * sys/kern/kern_descrip.c
+ */
+//LIST_HEAD(, proc) allproc;  /* Match kernel’s expected type */
+
+/*
+ * sys/kern/kern_auth.c
+ */ 
+int kauth_authorize_process(kauth_cred_t cred, kauth_action_t action,
+    struct proc *p, void *arg1, void *arg2, void *arg3)
+{
+    return 0;
+}
+
+int kauth_authorize_network(struct kauth_cred * cred, kauth_action_t action, enum kauth_network_req arg1, void *arg2, void *arg3, void *arg4) {
+    return 0;  /* Always allow */
+}
+
+kauth_listener_t kauth_listen_scope(const char *scope, kauth_scope_callback_t cb, void *arg) { return NULL; }
+uid_t kauth_cred_geteuid(kauth_cred_t cred) { return 0; }  /* Root UID */
+struct uidinfo *uid_find(uid_t uid) {
+    static struct uidinfo ui = {0};
+    ui.ui_uid = 0;
+    return &ui;
+}
+gid_t kauth_cred_getegid(kauth_cred_t cred) { return 0; }  /* Root GID */
+kauth_cred_t kauth_cred_hold(kauth_cred_t cred) { return cred; }
+void kauth_cred_free(kauth_cred_t cred) {}
+kauth_cred_t kauth_cred_get(void) { return NULL; }
+int kauth_authorize_system(kauth_cred_t cred, kauth_action_t action,
+    enum kauth_system_req req, void *arg1, void *arg2, void *arg3)
+{
+    return 0;
+}
+
+/*
+ * sys/kern/kern_condvar.c
+ */
+void
+cv_init(kcondvar_t *cv, const char *wmesg)
+{
+}
+void
+cv_broadcast(kcondvar_t *cv)
+{
+}
+void
+cv_wait(kcondvar_t *cv, kmutex_t *mtx)
+{
+}
+void cv_signal(kcondvar_t *cv) {}  /* No-op for single-threaded */
+int cv_wait_sig(kcondvar_t * cv, struct kmutex * mtx) { return 0; }  /* No blocking in single-threaded */
+int cv_timedwait(kcondvar_t  *cv, kmutex_t *mtx, int ticks) { return 0; }
+int cv_timedwait_sig(kcondvar_t *cv, kmutex_t *mtx, int timo) { return 0; }  /* No-op for single-threaded */
+void cv_destroy(kcondvar_t *cv) {}
+
+
+/*
+ * automic related
+ */
+void atomic_inc_uint(volatile unsigned int *ptr) {
+    (*ptr)++;
+}
+void atomic_dec_uint(volatile unsigned int *ptr) { (*ptr)--; }
+
+unsigned int atomic_dec_uint_nv(volatile unsigned int *ptr) {
+    return --(*ptr);  /* Non-atomic for single-threaded */
+}
+
+unsigned int atomic_inc_uint_nv(volatile unsigned int *val) { return ++(*val); }
+void *atomic_cas_ptr(volatile void *ptr, void *old, void *new) { if (*(void **)ptr == old) { *(void **)ptr = new; return old; } return *(void **)ptr; }
+
+uint32_t atomic_cas_32(volatile uint32_t *ptr, uint32_t oldval, uint32_t newval) {
+    uint32_t old = *ptr;
+    if (old == oldval) *ptr = newval;
+    return old;
+}
+
+void membar_producer(void) {
+}
+
+void membar_acquire(void) {
+    /* No-op in single-threaded user space */
+}
+
+/*
+ * virtual addr to physical add
+ */
+struct uvmexp uvmexp = {0};
+
+unsigned long vtophys(vaddr_t vaddr) {
+    return (unsigned long)vaddr;  /* No virtual-to-physical in user space */
+}
+vaddr_t uvm_km_alloc(struct vm_map *map, vsize_t size, vsize_t align, uvm_flag_t flag_t)
+{
+    void *ptr = malloc(size);
+    memset(ptr, 0, size);
+    return (vaddr_t)ptr;
+}
+void uvm_km_free(struct vm_map *map, vaddr_t addr, vsize_t size, uvm_flag_t flags) { free((void *)addr); }
+void uvm_unloan(void *v, int npages, int flags) {}
+int uvm_loan(struct vm_map *map, vaddr_t vaddr, vsize_t size, void *loan, int flags) { return 0; }  /* No loans needed */
+unsigned long uvm_vm_page_to_phys(void *page) { return 0; }  /* Dummy physical address */
+
+int proc_uidmatch(kauth_cred_t p1, kauth_cred_t p2) { return 1; }  /* Always match */
+
+struct pmap *const kernel_pmap_ptr = NULL;
+struct vm_map *kernel_map = NULL;
+
+void pmap_kenter_pa(vaddr_t va, paddr_t pa, vm_prot_t port, u_int flags) {}
+void pmap_kremove(vaddr_t va, vsize_t size) {}
+void pmap_update(pmap_t pmap) {}
+
+/* kthread to function */
+int kthread_create(pri_t pri, int flags, struct cpu_info *cpu, void (*func)(void *), void *arg, struct lwp **lwp, const char *fmt, ...) {
+    func(arg);  /* Call directly, no thread */
+    if (lwp) *lwp = NULL;  /* No lwp created */
+    return 0;
+}
+
+/*
+ * socket related
+ */
+/* Minimal fileops stub for socketops - defined in sys_socket.c, so commented out here */
+/*
+int soo_read(struct file *fp, off_t *off, struct uio *uio, kauth_cred_t cred, int flags) { return 0; }
+int soo_write(struct file *fp, off_t *off, struct uio *uio, kauth_cred_t cred, int flags) { return 0; }
+int soo_ioctl(struct file *fp, u_long cmd, void *data) { return 0; }
+int soo_close(struct file *fp) { return 0; }
+int soo_noop() { return 0; }
+
+const struct fileops socketops = {
+    .fo_read = soo_read,
+    .fo_write = soo_write,
+    .fo_ioctl = soo_ioctl,
+    .fo_fcntl = soo_noop,
+    .fo_poll = soo_noop,
+    .fo_stat = soo_noop,
+    .fo_close = soo_close,
+#ifndef __NetBSD__
+    .fo_restart = soo_noop,
+    .fo_kqfilter = soo_noop,
+#endif
+};
+*/
+
+int chgsbsize(struct uidinfo *uip, u_long *buf, u_long to, rlim_t max) {
+    *buf = to; 
+    return 1; 
+}
+int accept_filt_clear(struct socket *so) { return 0; }
+int accept_filt_setopt(struct socket *so, const struct sockopt *optval) { return 0; }
+int accept_filt_getopt(struct socket *so, struct sockopt *sopt) { return 0; }
+
+/* Stub function for ifioctl pointer */
+static int ifioctl_stub(struct socket *so, u_long cmd, void *data, struct lwp *l) { 
+    printf("ifioctl_stub: Called with cmd %lu\n", cmd);
+    return 0; // Simulate success for now
+}
+
+/* Define the ifioctl pointer - commented out to avoid multiple definition */
+/* Define the ifioctl pointer - commented out to avoid multiple definition */
+// int (*ifioctl)(struct socket *, u_long, void *, struct lwp *) = ifioctl_stub;
+
+uint8_t sockaddr_dl_measure(uint8_t namelen, uint8_t addrlen)
+{
+    return offsetof(struct sockaddr_dl, sdl_data[namelen + addrlen]);
+    //return sizeof(struct sockaddr_dl);
+}
+
+
+struct sockaddr_dl *sockaddr_dl_setaddr(struct sockaddr_dl *sdl, socklen_t sdllen,
+        const void *addr, uint8_t addrlen)
+{
+
+    socklen_t len;
+    len = sockaddr_dl_measure(sdl->sdl_nlen, addrlen);
+    memcpy(&sdl->sdl_data[sdl->sdl_nlen], addr, addrlen);
+    sdl->sdl_alen = addrlen;
+    sdl->sdl_len = len;
+    return sdl;
+}
+struct sockaddr_dl *sockaddr_dl_init(struct sockaddr_dl *sdl, socklen_t socklen, uint16_t ifindex,
+        uint8_t type, const void *name, uint8_t namelen, const void *addr,
+        uint8_t addrlen)
+{
+    socklen_t len;
+    sdl->sdl_family = AF_LINK;
+    sdl->sdl_slen = 0;
+
+    len = sockaddr_dl_measure(namelen, addrlen);
+    sdl->sdl_len = len;
+    sdl->sdl_index = ifindex;
+    sdl->sdl_type = type;
+    memset(&sdl->sdl_data[0], 0, namelen + addrlen);
+    if (name != NULL) {
+        memcpy(&sdl->sdl_data[0], name, namelen);
+        sdl->sdl_nlen = namelen;
+    } else
+        sdl->sdl_nlen = 0;
+    if (addr != NULL) {
+        memcpy(&sdl->sdl_data[sdl->sdl_nlen], addr, addrlen);
+        sdl->sdl_alen = addrlen;
+    } else
+        sdl->sdl_alen = 0;
+    return sdl;
+}
+
+/*
+ * uio related
+ */
+int uiomove(void *buf, size_t len, struct uio *uio) {
+    struct iovec *iov;
+    size_t cnt;
+    char *cp = buf;
+    int error = 0;
+
+    if (buf == NULL || uio == NULL) {
+        printf("uiomove: NULL pointer passed, buf=%p, uio=%p\n", buf, uio);
+        return EINVAL;
+    }
+
+    while (len > 0 && uio->uio_resid > 0) {
+        iov = uio->uio_iov;
+        if (iov == NULL) {
+            printf("uiomove: NULL iovec in uio structure\n");
+            return EINVAL;
+        }
+        cnt = iov->iov_len;
+        if (cnt == 0) {
+            uio->uio_iov++;
+            uio->uio_iovcnt--;
+            continue;
+        }
+        if (cnt > len)
+            cnt = len;
+        if (cnt > uio->uio_resid)
+            cnt = uio->uio_resid;
+
+        if (iov->iov_base == NULL) {
+            printf("uiomove: NULL iov_base in iovec\n");
+            return EINVAL;
+        }
+
+        if (uio->uio_rw == UIO_READ) {
+            memcpy((char *)iov->iov_base + uio->uio_offset, cp, cnt);
+        } else {
+            memcpy(cp, (char *)iov->iov_base + uio->uio_offset, cnt);
+        }
+
+        cp += cnt;
+        len -= cnt;
+        iov->iov_len -= cnt;
+        uio->uio_resid -= cnt;
+        uio->uio_offset += cnt;
+    }
+
+    return error;
+}
+
+/* module hook stub */
+void *uipc_socket_50_setopt1_hook = NULL;
+void *uipc_socket_50_getopt1_hook = NULL;
+void *uipc_socket_50_sbts_hook = NULL;
+void *uipc_syscalls_40_hook = NULL;
+void *uipc_syscalls_50_hook = NULL;
+void *if_cvtcmd_43_hook = NULL;
+void *ifmedia_80_pre_hook = NULL;
+void *if_ifioctl_43_hook = NULL;
+void *ifmedia_80_post_hook = NULL;
+void *rtsock_iflist_70_hook = NULL;
+void *rtsock_iflist_14_hook = NULL;
+void *rtsock_iflist_50_hook = NULL;
+void *rtsock_oifmsg_14_hook = NULL;
+void *rtsock_oifmsg_50_hook = NULL;
+void *rtsock_newaddr_70_hook = NULL;
+void *net_inet6_nd_90_hook = NULL;
+
+bool module_hook_tryenter(bool *b, struct localcount *hook) { return 0; }  /* No hook available */
+void module_hook_exit(struct localcount *hook) {}
+void module_hook_set(bool *hooked, struct localcount *lc) {}
+void module_hook_unset(bool *hooked, struct localcount *lc) {}
+int enosys(void) { return ENOSYS; }
+
+
+/*
+ * pint and bpf filter
+ */
+const char hexdigits[] = "0123456789abcdef";
+const int schedppq = 1;
+void psref_target_init(struct psref_target *target, struct psref_class *class) {}
+struct psref_class *psref_class_create(const char *name, int flags) { return NULL; }
+void psref_acquire(struct psref *psref, const struct psref_target *target,
+        struct psref_class *class) {}
+void psref_release(struct psref *psref, const struct psref_target *target,
+        struct psref_class *class) {}
+void psref_target_destroy(struct psref_target *target, struct psref_class *class) {}
+
+__attribute__((noinline))
+bool psref_held(const struct psref_target *psref, struct psref_class *class) {
+    return true;
+}
+void psref_copy(struct psref *pto, const struct psref *pfrom,
+    struct psref_class *class) {}
+void psref_class_destroy(struct psref_class *class) {}
+
+pfil_head_t *pfil_head_create(int type, void *arg) { return NULL; }
+void pfil_head_destroy(pfil_head_t *ph) {}
+void pfil_run_ifhooks(pfil_head_t *ph, u_long cmd, struct ifnet *ifp) {}
+int pfil_add_hook(pfil_func_t func, void *arg, int flags, pfil_head_t *ph) { return 0; }
+int pfil_remove_hook(pfil_func_t func, void *arg, int flags, pfil_head_t *ph) { return 0; }
+int pfil_run_hooks(pfil_head_t *ph, struct mbuf **mp, ifnet_t *ifp, int dir) { return 0; }
+void pfil_run_addrhooks(pfil_head_t *ph, u_long cmd, struct ifaddr *ifa) {}
+
+/*
+ * link layer
+ */
+
+void carp_proto_input(struct mbuf *m, int off, int proto) {}
+int carp6_proto_input(struct mbuf *m, int *offp, int proto) { return 0; }
+void carp_init(void) {}
+
+#define	IF_STATS_SIZE	(sizeof(uint64_t) * IF_NSTATS)
+void if_stats_init(ifnet_t * const ifp) {
+    ifp->if_stats = percpu_alloc(IF_STATS_SIZE);
+}
+void carp_ifdetach(void *ifp) {}
+void if_stats_to_if_data(struct ifnet *ifp, struct if_data *ifd, bool zero_stats) {}
+void if_stats_fini(ifnet_t * const ifp) {}
+int module_autoload(const char *name, modclass_t class) { return ENOENT; }
+void carp_carpdev_state(void *ifp) {}
+struct ifnet *carp_ourether(void *ifp, struct ether_header *eh, u_char type, int flags) { return NULL; }
+int carp_input(struct mbuf *m, u_int8_t *iphlen, u_int8_t *ttl, u_int16_t loop_code) { return 0; }
+int carp_iamatch(struct in_ifaddr *ia, u_int8_t *mac, u_int32_t *count) { return 0; }
+struct ifaddr *carp_iamatch6(void *ifp, struct in6_addr *addr) { return NULL; }
+
+/* Removed duplicate softint_disestablish definition */
+
+/* bstp related */
+const uint8_t *bstp_etheraddr = NULL;
+void bstp_initialization(struct ifnet *ifp) {}
+void bstp_stop(struct ifnet *ifp) {}
+int bstp_input(struct ifnet *ifp, struct mbuf **mp) { return 0; };
+
+
+/* ether related */
+int ether_sw_offload_tx(struct ifnet *ifp, struct mbuf *m) { return 0; }
+
+/* kern/subr_entropy.c */
+uint32_t entropy_epoch(void) { return 0; }
+void rnd_add_data(void *ctx, const void *buf, uint32_t len, uint32_t entropy) {}
+
+/*sys/net/agr/if_agr.c */
+void agr_input(struct ifnet *ifp, struct mbuf **mp) {}
+
+/* sys/net/if_pppoe.c, ieee8023ad_lacp.c */
+void pppoedisc_input(struct ifnet *ifp, struct mbuf **mp) {}
+void pppoe_input(struct ifnet *ifp, struct mbuf **mp) {}
+int ieee8023ad_lacp_input(struct ifnet *ifp, struct mbuf **mp) { return 0; }
+int ieee8023ad_marker_input(struct ifnet *ifp, struct mbuf **mp) { return 0; }
+
+/* sys/net/if_pktq.c */
+uint32_t pktq_rps_hash(const pktq_rps_hash_func_t *funcp, const struct mbuf *m) { return 0; }
+void pktq_ifdetach(void) {}
+int sysctl_pktq_rps_hash_handler(SYSCTLFN_ARGS) { return 0; }
+static uint32_t stub_pktq_rps_hash_default(struct mbuf *m) { return 0; }
+const pktq_rps_hash_func_t pktq_rps_hash_default = stub_pktq_rps_hash_default;
+void
+pktq_sysctl_setup(pktqueue_t * const pq, struct sysctllog ** const clog,
+		  const struct sysctlnode * const parent_node, const int qid)
+{
+}
+/* sys/kern/subr_prf.c */
+void aprint_error(const char *fmt, ...) {}
+
+/* sys/kern/kern_stub.c */
+int
+enxio(void)
+{
+	return (ENXIO);
+}
+void kpreempt_disable(void) {}
+void kpreempt_enable(void) {}
+bool kpreempt_disabled(void) { return true; }
+
+
+/* sys/net/if_media.c - stub to avoid multiple definition */
+int ifmedia_ioctl(struct ifnet *ifp, struct ifreq *ifr, void *ifm, u_long cmd) { return 0; }
+
+/* sys/lib/libkern/kern_assert.c */
+void kern_assert(const char *fmt, ...) {}
+
+/* sys/net/raw_cb.c */
+int raw_attach(struct socket *so, int proto, struct rawcbhead *rcb) { return 0; }
+void raw_detach(struct socket *so) {}
+void raw_disconnect(struct socket *so) {}
+
+/* sys/kern/sys_socket.c stubs */
+int do_sys_peeloff(struct socket *so, void *arg) { return 0; }
+int eopnotsupp(void) { return EOPNOTSUPP; }
+
+/* sys/net/rtsock_shared */
+void (*vec_sctp_add_ip_address)(struct ifaddr *) = NULL;
+void (*vec_sctp_delete_ip_address)(struct ifaddr *) = NULL;
+
+/* sys/net/net_stats.c */
+int netstat_sysctl(percpu_t *stat, u_int ncounters, SYSCTLFN_ARGS) { return 0; }
+
+size_t coherency_unit = 64;
+
+int _init_once(once_t *o, int (*fn)(void))
+{
+    if (o->o_refcnt++ == 0) {
+        o->o_error = fn();
+    }
+    return 0;
+}
+
+/* ppsrate */
+int
+ppsratecheck(lasttime, curpps, maxpps)
+	struct timeval *lasttime;
+	int *curpps;
+	int maxpps;	/* maximum pps allowed */
+{
+    return 1;
+}
+
+/* sys/kern/subrthmap.c */
+thmap_t *thmap_create(uintptr_t baseptr, const thmap_ops_t *ops, unsigned flags) { return NULL; }
+void *thmap_get(thmap_t *thmap, const void *key, size_t len) { return NULL; }
+void *thmap_put(thmap_t *thmap, const void *key, size_t len, void *val) { return NULL; }
+void *thmap_del(thmap_t *thmap, const void *key, size_t len) { return NULL; }
+void *thmap_stage_gc(thmap_t *thmap) { return NULL; }
+void thmap_gc(thmap_t *thmap, void *ref) {}
+
+/* atomic related */
+unsigned int atomic_cas_uint(volatile unsigned int *ptr, unsigned int old, unsigned int new) { if (*ptr == old) { *ptr = new; return old; } return *ptr; }
+void atomic_and_uint(volatile unsigned int *ptr, unsigned int val) { *ptr &= val; }
+void atomic_or_uint(volatile unsigned int *ptr, unsigned int val) { *ptr |= val; }
+
+
+cprng_strong_t *kern_cprng = NULL;
+size_t cprng_strong(cprng_strong_t *c, void *buf, size_t len, int flags) {
+    memset(buf, 0, len); // Dummy implementation
+    return len;
+}
+
+
+/* ipv6 related */
+//int sin6_print(char *buf, size_t len, const void *v) { return 0; }
+
+/* sys/crpto/cprng_fast/cprng_fastp.c */
+uint32_t cprng_fast32(void) {
+    //return 0;
+    return (uint32_t)rand();
+}
+size_t cprng_fast(void *buf, size_t len) {
+    //return 0;
+    return (size_t)rand();
+}
+uint32_t cprng_strong32(void) {
+    //return 0;
+    return (uint32_t)rand();
+}
+
+
+/* crypto */
+void MD5Init(void *ctx) {}
+void MD5Update(void *ctx, const unsigned char *data, unsigned int len) {}
+void MD5Final(unsigned char *digest, void *ctx) {}
+
+/* sys/kern/kern_ktrace.c */
+int ktrace_on = 0;
+void ktr_mibio(int a, enum uio_rw b, const void *c, size_t d, int e) {}
+void ktr_mib(const int *a, u_int b) {}
+
+/* sys/kern/subr_asan.c */
+int
+kcopy(const void *src, void *dst, size_t len)
+{
+	memcpy(dst, src, len);
+#ifdef DEBUG
+	if (memcmp(dst, src, len) != 0)
+		panic("kcopy not finished correctly\n");
+#endif
+	return 0;
+}
+
+int
+copyinstr(const void *uaddr, void *kaddr, size_t len, size_t *done)
+{
+	len = uimin(strnlen(uaddr, len), len) + 1;
+	strncpy(kaddr, uaddr, len);
+	if (done)
+		*done = len;
+	return 0;
+}
+
+/* sysctl related */
+//void sysctl_basenode_init(void) {}
+/* ?? */
+void blake2s(void *out, size_t outlen, const void *in, size_t inlen, const void *key, size_t keylen) {}
+
+/* kern_event.c - now using real implementation, removed knote_fdclose stub */
+
+/* sys/kern/kern_synch.c */
+int kpause(const char *reason, bool intr, int ticks, kmutex_t *mtx) { return 0; }
+void preempt_point(void) {}
+struct lwp *syncobj_noowner(wchan_t wchan) { return NULL; }
+
+u_int maxfiles = 1024*1024; /* 1M fd */
+
+/* sys/kern/subr_prf.c */
+void tablefull(const char *tab, const char *hint) {}
+
+struct proc *proc_find(pid_t pid) { return NULL; }
+int pgid_in_session(struct proc *p, pid_t pgid) { return 0; }
+
+/* sys/kern/kern_sig.c */
+void kpsignal(struct proc *p, ksiginfo_t *ksi, void *data) {}
+void kpgsignal(struct pgrp *pg, ksiginfo_t *ksi, void *data, int checkctty) {}
+
+int devenodev(dev_t dev, ...) { return ENODEV; }
+void ttyvenodev(struct tty *tp, ...) {}
+
+/* sys/kern/subr_devsw.c */
+paddr_t nommap(dev_t dev, off_t off, int prot) { return (paddr_t)-1; }
+
+/* sys/kern/subr_evcnt.c */
+void evcnt_attach_dynamic(struct evcnt *ev, int type, const struct evcnt *parent,
+    const char *group, const char *name) {}
+
+/* sys/kern/kern_rate.c */
+int ratecheck(struct timeval *lasttime, const struct timeval *mininterval) { return 1; }
+
+bool mp_online = true;
+
+/* sys/kern/subr_xcall.c */
+uint64_t xc_broadcast(unsigned int flags, xcfunc_t func, void *arg1, void *arg2) { return 1; }
+void xc_wait(uint64_t where) {};
+
+/* Function to cleanup allocated percpu memory */
+void percpu_cleanup(void)
+{
+    if (cur_percpu != NULL) {
+        percpu_free(cur_percpu, cur_percpu->pc_size);
+    }
+    if (new_percpu != NULL) {
+        percpu_free(new_percpu, new_percpu->pc_size);
+    }
+}
+
+long lwp_pctr(void) { return 0; }
+
+krwlock_t exec_lock;
+
+
+/* sysctl base related */
+const char ostype[] = "NetBSD";
+const char osrelease[] = "10.0";
+const char version[] = "NetBSD 10.0 (USERSPACE)";
+char machine[] = "x86_64";
+char machine_arch[] = "x86_64";
+const char *cpu_getmodel(void) {
+    return "Unknown CPU";
+}
+int ncpuonline = 1;
+
+/*device call*/
+devhandle_t dummy_devhandle;
+int		device_call_generic(device_t dev, devhandle_t handle,
+		    const struct device_call_generic *dcg) {return 0;}
+devhandle_t	device_handle(device_t dev) { return dummy_devhandle;}
+
+ssize_t
+device_getprop_data(device_t dev, const char *prop, void *buf, size_t buflen)
+{ return 0; }
+
+/* kern_event.c dependencies */
+uid_t kauth_cred_getuid(kauth_cred_t cred) { return 0; }  /* Root UID */
+int copyoutstr(const void *from, void *to, size_t maxlen, size_t *done) {
+    size_t len = strnlen(from, maxlen) + 1;
+    if (len > maxlen) len = maxlen;
+    memcpy(to, from, len);
+    if (done) *done = len;
+    return 0;
+}
+int inittimeleft(struct timespec *ts, struct timespec *sleepts) {
+    if (ts) {
+        nanotime(sleepts);
+    }
+    return 0;
+}
+int gettimeleft(struct timespec *ts, struct timespec *sleepts) {
+    if (ts) {
+        struct timespec now;
+        nanotime(&now);
+        /* Simple: just check if time remaining */
+        if (now.tv_sec > sleepts->tv_sec + ts->tv_sec) {
+            ts->tv_sec = 0;
+            ts->tv_nsec = 0;
+        }
+    }
+    return 0;
+}
+
+/* kern_event.c: filterops for signal and fs filters (not used in userspace) */
+#include <sys/event.h>
+static int filt_stub_attach(struct knote *kn) { return ENOTSUP; }
+static void filt_stub_detach(struct knote *kn) {}
+static int filt_stub_event(struct knote *kn, long hint) { return 0; }
+const struct filterops sig_filtops = {
+    .f_flags = 0,
+    .f_attach = filt_stub_attach,
+    .f_detach = filt_stub_detach,
+    .f_event = filt_stub_event,
+};
+const struct filterops fs_filtops = {
+    .f_flags = 0,
+    .f_attach = filt_stub_attach,
+    .f_detach = filt_stub_detach,
+    .f_event = filt_stub_event,
+};
+
+/* kern_event.c: atomic_add_int */
+void atomic_add_int(volatile unsigned int *ptr, int val) { *ptr += val; }
+
