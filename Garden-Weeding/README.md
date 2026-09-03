@@ -42,12 +42,6 @@ The tool presented here follows this principle. It uses a large language model t
 
 Embeddings are cached on disk (keyed by file content hash and model configuration), so re-running the tool on an unchanged codebase is nearly instant.
 
-## Requirements
-
-- Python >= 3.10
-- A HuggingFace transformer model downloaded locally (the tool runs in offline
-  mode by default -- set `HF_HUB_OFFLINE=0` to allow downloads)
-- (Optional) An NVIDIA GPU with CUDA for faster embedding
 
 ## Usage
 
@@ -148,8 +142,7 @@ characters like `^`, `$`, `[`, `]`, `+`, `|`):
 ^(build|dist)/
 ```
 
-The exclusion list applies to both new files discovered during a scan and
-files already present in the cache.
+The exclusion list applies to both new files discovered during a scan and files already present in the cache.
 
 ### Output
 
@@ -191,10 +184,12 @@ garden-weeding --train \
 
 This embeds all training files, trains a Random Forest classifier (200 trees,
 max depth 12), and saves it as a pickle file at the path given by
-`--classifier-file`. The new classifier is then used for all subsequent
+`--classifier-file`. The new classifier can then be used for all subsequent
 classification runs.
 
 Training data can use any file extension if you pass `--include-non-c-files`.
+
+Fun-Fact: The tool is not limited to classify cryptographic or non-cryptographic code only. In theory, every classification (like "happy emotion" or "sad emotion") that can be represented by text can be classified using this architecture. Just put the class you want to detect into the positive folder and text from the other class into the negative folder.  
 
 ## Running tests
 
@@ -245,7 +240,3 @@ Garden-Weeding/
       main-test.py
       process_file-test.py
 ```
-
-## License
-
-See repository for license information.
