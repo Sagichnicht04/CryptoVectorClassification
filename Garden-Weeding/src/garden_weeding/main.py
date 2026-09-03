@@ -128,6 +128,14 @@ def main():
         ),
     )
     files.add_argument(
+        "--file-size-limit", default=5000, type=int,
+        help=(
+            "maximum number of lines a file may have to be included in the "
+            "analysis. Files exceeding this limit are skipped. "
+            "Set to 0 to disable the limit (default: %(default)s)"
+        ),
+    )
+    files.add_argument(
         "--target", default="./",
         help="directory to scan for files to classify (default: %(default)s)",
     )

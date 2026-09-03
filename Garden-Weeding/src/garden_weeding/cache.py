@@ -35,6 +35,25 @@ def get_lang_from_path(path):
         return 'cpp'
     return None
 
+def exceeds_line_limit(file_path, limit):
+    """Return True if the file at *file_path* has more than *limit* lines.
+
+    A *limit* of 0 (or negative) disables the check and always returns False.
+    The file is read lazily -- counting stops as soon as the limit is exceeded.
+    """
+    if limit <= 0:
+        return False
+    try:
+        with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+            count = 0
+            for _ in f:
+                count += 1
+                if count > limit:
+                    return True
+    except OSError:
+        return False
+    return False
+
 
 def get_cache_identifier(args):
     return hashlib.md5(f"{args.token_size}_{args.chunk_overlap_size}_{args.embedding_model_name}".encode()).hexdigest()
@@ -51,6 +70,7 @@ def get_embedded_files(args):
     all_files = torch.load(embedded_files, weights_only=False)
 
     exclusion_patterns = load_exclusion_patterns(args)
+    file_size_limit = args.file_size_limit
 
     targets = [args.target]
     if args.train:
@@ -82,6 +102,10 @@ def get_embedded_files(args):
                     break
             if excluded:
                 continue
+
+        # Skip entries whose file exceeds the line limit.
+        if path and exceeds_line_limit(path, file_size_limit):
+            continue
 
         filtered[file_hash] = entry
     return filtered
@@ -116,6 +140,7 @@ def load_uncached_hashes(args):
 
     embedded_files_hashes = get_embedded_files_hashes(args) if not args.no_cache else []
     exclusion_patterns = load_exclusion_patterns(args)
+    file_size_limit = args.file_size_limit
     uncached_hashes = {}
     targets = [args.target]
     if args.train:
@@ -125,6 +150,8 @@ def load_uncached_hashes(args):
             for filename in files:
                 path = os.path.join(root, filename)
                 if is_excluded(path, target, exclusion_patterns):
+                    continue
+                if exceeds_line_limit(path, file_size_limit):
                     continue
                 lang = get_lang_from_path(path)
                 if lang or args.include_non_c_files:

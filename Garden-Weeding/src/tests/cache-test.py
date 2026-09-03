@@ -54,6 +54,7 @@ def _make_args(
     chunk_overlap_size: int = 512,
     embedding_model_name: str = "test-model",
     exclusion_list: str | Path = "/nonexistent/.exclude",
+    file_size_limit: int = 0,
 ):
     """Build a minimal argparse.Namespace matching what cache.py reads."""
     return argparse.Namespace(
@@ -70,6 +71,7 @@ def _make_args(
         chunk_overlap_size=chunk_overlap_size,
         embedding_model_name=embedding_model_name,
         exclusion_list=str(exclusion_list),
+        file_size_limit=file_size_limit,
     )
 
 
@@ -1033,5 +1035,150 @@ def test_get_embedded_files_entries_without_path_are_kept(workspace):
 
     assert "aa" in loaded
     assert "bb" in loaded  # kept because we can't determine its location
+    assert len(loaded) == 2
+
+
+# --------------------------------------------------------------------------- #
+# exceeds_line_limit
+# --------------------------------------------------------------------------- #
+class TestExceedsLineLimit:
+
+    def test_small_file_under_limit(self, tmp_path):
+        f = tmp_path / "small.c"
+        f.write_text("line1\nline2\nline3\n")
+        assert not cache.exceeds_line_limit(str(f), 5)
+
+    def test_file_exactly_at_limit(self, tmp_path):
+        f = tmp_path / "exact.c"
+        f.write_text("\n".join(f"line{i}" for i in range(10)) + "\n")
+        assert not cache.exceeds_line_limit(str(f), 10)
+
+    def test_file_exceeds_limit(self, tmp_path):
+        f = tmp_path / "big.c"
+        f.write_text("\n".join(f"line{i}" for i in range(100)) + "\n")
+        assert cache.exceeds_line_limit(str(f), 10)
+
+    def test_limit_zero_disables_check(self, tmp_path):
+        f = tmp_path / "big.c"
+        f.write_text("\n".join(f"line{i}" for i in range(10000)) + "\n")
+        assert not cache.exceeds_line_limit(str(f), 0)
+
+    def test_limit_negative_disables_check(self, tmp_path):
+        f = tmp_path / "big.c"
+        f.write_text("line\n" * 100)
+        assert not cache.exceeds_line_limit(str(f), -1)
+
+    def test_nonexistent_file_returns_false(self, tmp_path):
+        assert not cache.exceeds_line_limit(str(tmp_path / "nope.c"), 10)
+
+    def test_empty_file(self, tmp_path):
+        f = tmp_path / "empty.c"
+        f.write_text("")
+        assert not cache.exceeds_line_limit(str(f), 1)
+
+    def test_single_line_file_at_limit_one(self, tmp_path):
+        f = tmp_path / "one.c"
+        f.write_text("only line\n")
+        assert not cache.exceeds_line_limit(str(f), 1)
+
+    def test_two_lines_exceeds_limit_one(self, tmp_path):
+        f = tmp_path / "two.c"
+        f.write_text("line1\nline2\n")
+        assert cache.exceeds_line_limit(str(f), 1)
+
+
+# --------------------------------------------------------------------------- #
+# load_uncached_hashes with file size limit
+# --------------------------------------------------------------------------- #
+def test_load_uncached_hashes_skips_files_exceeding_line_limit(workspace):
+    """Files with more lines than --file-size-limit must not be returned."""
+    # The workspace fixture creates small files (1-2 lines each).
+    # Set a limit of 1 line -- files with 2+ lines should be skipped.
+    # a.c has 1 line ("int main(void) { return 0; }\n") -> 1 line
+    # b.cpp has 1 line -> 1 line
+    # sub/c.cc has 2 lines -> exceeds limit=1
+    # sub/d.cxx has 2 lines -> exceeds limit=1
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        file_size_limit=1,
+    )
+    result = cache.load_uncached_hashes(args)
+
+    filenames = {Path(p).name for p in result.values()}
+    assert "c.cc" not in filenames
+    assert "d.cxx" not in filenames
+    assert "a.c" in filenames
+    assert "b.cpp" in filenames
+    assert len(result) == 2
+
+
+def test_load_uncached_hashes_limit_zero_includes_all(workspace):
+    """A limit of 0 disables the check -- all files should be included."""
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        file_size_limit=0,
+    )
+    result = cache.load_uncached_hashes(args)
+
+    # All 4 C/C++ files should be present (notes.txt is filtered by extension).
+    assert len(result) == 4
+
+
+def test_load_uncached_hashes_large_limit_includes_all(workspace):
+    """A limit larger than any file includes everything."""
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        file_size_limit=99999,
+    )
+    result = cache.load_uncached_hashes(args)
+    assert len(result) == 4
+
+
+# --------------------------------------------------------------------------- #
+# get_embedded_files with file size limit
+# --------------------------------------------------------------------------- #
+def test_get_embedded_files_skips_cached_entries_exceeding_line_limit(workspace):
+    """Cached files whose on-disk version now exceeds the line limit must be
+    filtered out by get_embedded_files."""
+    # a.c has 1 line, sub/c.cc has 2 lines.
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        file_size_limit=1,
+    )
+    cache.init_cache(args)
+
+    payload = {
+        "aa": {"embedding": [1], "path": str(workspace["target"] / "a.c")},
+        "bb": {"embedding": [2], "path": str(workspace["target"] / "sub" / "c.cc")},
+    }
+    cache.update_cache(args, payload)
+
+    loaded = cache.get_embedded_files(args)
+
+    assert "aa" in loaded       # 1 line, within limit
+    assert "bb" not in loaded   # 2 lines, exceeds limit=1
+    assert len(loaded) == 1
+
+
+def test_get_embedded_files_limit_zero_keeps_all_cached(workspace):
+    """Limit of 0 disables the check -- all cached entries are returned."""
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        file_size_limit=0,
+    )
+    cache.init_cache(args)
+
+    payload = {
+        "aa": {"embedding": [1], "path": str(workspace["target"] / "a.c")},
+        "bb": {"embedding": [2], "path": str(workspace["target"] / "sub" / "c.cc")},
+    }
+    cache.update_cache(args, payload)
+
+    loaded = cache.get_embedded_files(args)
     assert len(loaded) == 2
 
