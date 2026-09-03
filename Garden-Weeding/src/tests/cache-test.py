@@ -1039,77 +1039,77 @@ def test_get_embedded_files_entries_without_path_are_kept(workspace):
 
 
 # --------------------------------------------------------------------------- #
-# exceeds_line_limit
+# exceeds_file_size_limit
 # --------------------------------------------------------------------------- #
-class TestExceedsLineLimit:
+class TestExceedsFileSizeLimit:
 
     def test_small_file_under_limit(self, tmp_path):
         f = tmp_path / "small.c"
-        f.write_text("line1\nline2\nline3\n")
-        assert not cache.exceeds_line_limit(str(f), 5)
+        f.write_text("hello")  # 5 chars
+        assert not cache.exceeds_file_size_limit(str(f), 10)
 
     def test_file_exactly_at_limit(self, tmp_path):
         f = tmp_path / "exact.c"
-        f.write_text("\n".join(f"line{i}" for i in range(10)) + "\n")
-        assert not cache.exceeds_line_limit(str(f), 10)
+        f.write_text("a" * 50)  # 50 chars
+        assert not cache.exceeds_file_size_limit(str(f), 50)
 
     def test_file_exceeds_limit(self, tmp_path):
         f = tmp_path / "big.c"
-        f.write_text("\n".join(f"line{i}" for i in range(100)) + "\n")
-        assert cache.exceeds_line_limit(str(f), 10)
+        f.write_text("a" * 200)  # 200 chars
+        assert cache.exceeds_file_size_limit(str(f), 100)
 
     def test_limit_zero_disables_check(self, tmp_path):
         f = tmp_path / "big.c"
-        f.write_text("\n".join(f"line{i}" for i in range(10000)) + "\n")
-        assert not cache.exceeds_line_limit(str(f), 0)
+        f.write_text("a" * 100000)
+        assert not cache.exceeds_file_size_limit(str(f), 0)
 
     def test_limit_negative_disables_check(self, tmp_path):
         f = tmp_path / "big.c"
-        f.write_text("line\n" * 100)
-        assert not cache.exceeds_line_limit(str(f), -1)
+        f.write_text("a" * 500)
+        assert not cache.exceeds_file_size_limit(str(f), -1)
 
     def test_nonexistent_file_returns_false(self, tmp_path):
-        assert not cache.exceeds_line_limit(str(tmp_path / "nope.c"), 10)
+        assert not cache.exceeds_file_size_limit(str(tmp_path / "nope.c"), 10)
 
     def test_empty_file(self, tmp_path):
         f = tmp_path / "empty.c"
         f.write_text("")
-        assert not cache.exceeds_line_limit(str(f), 1)
+        assert not cache.exceeds_file_size_limit(str(f), 1)
 
-    def test_single_line_file_at_limit_one(self, tmp_path):
+    def test_one_char_at_limit_one(self, tmp_path):
         f = tmp_path / "one.c"
-        f.write_text("only line\n")
-        assert not cache.exceeds_line_limit(str(f), 1)
+        f.write_text("x")
+        assert not cache.exceeds_file_size_limit(str(f), 1)
 
-    def test_two_lines_exceeds_limit_one(self, tmp_path):
+    def test_two_chars_exceeds_limit_one(self, tmp_path):
         f = tmp_path / "two.c"
-        f.write_text("line1\nline2\n")
-        assert cache.exceeds_line_limit(str(f), 1)
+        f.write_text("xy")
+        assert cache.exceeds_file_size_limit(str(f), 1)
 
 
 # --------------------------------------------------------------------------- #
 # load_uncached_hashes with file size limit
 # --------------------------------------------------------------------------- #
-def test_load_uncached_hashes_skips_files_exceeding_line_limit(workspace):
-    """Files with more lines than --file-size-limit must not be returned."""
-    # The workspace fixture creates small files (1-2 lines each).
-    # Set a limit of 1 line -- files with 2+ lines should be skipped.
-    # a.c has 1 line ("int main(void) { return 0; }\n") -> 1 line
-    # b.cpp has 1 line -> 1 line
-    # sub/c.cc has 2 lines -> exceeds limit=1
-    # sub/d.cxx has 2 lines -> exceeds limit=1
+def test_load_uncached_hashes_skips_files_exceeding_char_limit(workspace):
+    """Files with more characters than --file-size-limit must not be returned."""
+    # Workspace files:
+    #   a.c   = 30 chars  ("int main(void) { return 0; }\n")
+    #   b.cpp = 25 chars  ("int main() { return 1; }\n")
+    #   c.cc  = 22 chars  ("// cc file\nint x = 2;\n")
+    #   d.cxx = 23 chars  ("// cxx file\nint y = 3;\n")
+    # A limit of 24 should exclude a.c (30) and b.cpp (25), keep c.cc and d.cxx.
     args = _make_args(
         workspace["cache_dir"],
         workspace["target"],
-        file_size_limit=1,
+        file_size_limit=24,
     )
     result = cache.load_uncached_hashes(args)
 
     filenames = {Path(p).name for p in result.values()}
-    assert "c.cc" not in filenames
-    assert "d.cxx" not in filenames
-    assert "a.c" in filenames
-    assert "b.cpp" in filenames
+    assert "a.c" not in filenames
+    assert "b.cpp" not in filenames
+    assert "c.cc" in filenames
+    assert "d.cxx" in filenames
     assert len(result) == 2
 
 
@@ -1140,14 +1140,14 @@ def test_load_uncached_hashes_large_limit_includes_all(workspace):
 # --------------------------------------------------------------------------- #
 # get_embedded_files with file size limit
 # --------------------------------------------------------------------------- #
-def test_get_embedded_files_skips_cached_entries_exceeding_line_limit(workspace):
-    """Cached files whose on-disk version now exceeds the line limit must be
+def test_get_embedded_files_skips_cached_entries_exceeding_char_limit(workspace):
+    """Cached files whose on-disk version exceeds the character limit must be
     filtered out by get_embedded_files."""
-    # a.c has 1 line, sub/c.cc has 2 lines.
+    # a.c = 30 chars, sub/c.cc = 22 chars.  Limit 25 keeps c.cc, drops a.c.
     args = _make_args(
         workspace["cache_dir"],
         workspace["target"],
-        file_size_limit=1,
+        file_size_limit=25,
     )
     cache.init_cache(args)
 
@@ -1159,8 +1159,8 @@ def test_get_embedded_files_skips_cached_entries_exceeding_line_limit(workspace)
 
     loaded = cache.get_embedded_files(args)
 
-    assert "aa" in loaded       # 1 line, within limit
-    assert "bb" not in loaded   # 2 lines, exceeds limit=1
+    assert "aa" not in loaded   # 30 chars, exceeds limit=25
+    assert "bb" in loaded       # 22 chars, within limit
     assert len(loaded) == 1
 
 

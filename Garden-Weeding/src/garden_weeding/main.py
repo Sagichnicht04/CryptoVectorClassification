@@ -128,10 +128,10 @@ def main():
         ),
     )
     files.add_argument(
-        "--file-size-limit", default=5000, type=int,
+        "--file-size-limit", default=100000, type=int,
         help=(
-            "maximum number of lines a file may have to be included in the "
-            "analysis. Files exceeding this limit are skipped. "
+            "maximum number of characters a file may have to be included in "
+            "the analysis. Files exceeding this limit are skipped. "
             "Set to 0 to disable the limit (default: %(default)s)"
         ),
     )

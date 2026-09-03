@@ -38,19 +38,20 @@ def get_lang_from_path(path):
         return 'cpp'
     return None
 
-def exceeds_line_limit(file_path, limit):
-    """Return True if the file at *file_path* has more than *limit* lines.
+def exceeds_file_size_limit(file_path, limit):
+    """Return True if the file at *file_path* has more than *limit* characters.
 
     A *limit* of 0 (or negative) disables the check and always returns False.
-    The file is read lazily -- counting stops as soon as the limit is exceeded.
+    The file is read in chunks so that large files do not need to be loaded
+    into memory entirely -- counting stops as soon as the limit is exceeded.
     """
     if limit <= 0:
         return False
     try:
         with open(file_path, "r", encoding="utf-8", errors="replace") as f:
             count = 0
-            for _ in f:
-                count += 1
+            for chunk in iter(lambda: f.read(8192), ""):
+                count += len(chunk)
                 if count > limit:
                     return True
     except OSError:
@@ -106,9 +107,9 @@ def get_embedded_files(args):
             if excluded:
                 continue
 
-        # Skip entries whose file exceeds the line limit.
-        if path and exceeds_line_limit(path, file_size_limit):
-            log.warning("Skipping %s (exceeds %d line limit)", path, file_size_limit)
+        # Skip entries whose file exceeds the character limit.
+        if path and exceeds_file_size_limit(path, file_size_limit):
+            log.warning("Skipping %s (exceeds %d character limit)", path, file_size_limit)
             continue
 
         filtered[file_hash] = entry
@@ -155,8 +156,8 @@ def load_uncached_hashes(args):
                 path = os.path.join(root, filename)
                 if is_excluded(path, target, exclusion_patterns):
                     continue
-                if exceeds_line_limit(path, file_size_limit):
-                    log.warning("Skipping %s (exceeds %d line limit)", path, file_size_limit)
+                if exceeds_file_size_limit(path, file_size_limit):
+                    log.warning("Skipping %s (exceeds %d character limit)", path, file_size_limit)
                     continue
                 lang = get_lang_from_path(path)
                 if lang or args.include_non_c_files:
