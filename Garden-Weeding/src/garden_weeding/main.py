@@ -1,12 +1,12 @@
 import argparse
 import logging
 import sys
-from classifier import RandomForestClassifier
+from .classifier import RandomForestClassifier
 from pathlib import Path
-from cache import update_cache
-from cache import get_embedded_files
-from cache import load_uncached_hashes
-from cache import map_training_data
+from .cache import update_cache
+from .cache import get_embedded_files
+from .cache import load_uncached_hashes
+from .cache import map_training_data
 import time
 
 home = Path.home()
@@ -205,7 +205,7 @@ def main():
 
     # -- Embed new files ------------------------------------------------------
     if uncached_count > 0:
-        from process_file import file_processor
+        from .process_file import file_processor
         processor = file_processor(args)
 
         log.debug("Using device: %s", "GPU" if processor.USE_GPU else "CPU")
@@ -306,7 +306,7 @@ def _print_report(crypto_files, non_crypto_files, threshold, args):
         print("-" * 72)
         for entry in sorted(non_crypto_files, key=lambda e: -max(e["probabilities"]) if e["probabilities"] else 0):
             max_prob = max(entry["probabilities"]) if entry["probabilities"] else 0.0
-            print(f"    [OK]      {entry['path']}")
+            print(f"    [NON-CRYPTO]      {entry['path']}")
             log.debug("              max_score: %.4f  chunks: %d", max_prob, len(entry["probabilities"]))
         print()
 

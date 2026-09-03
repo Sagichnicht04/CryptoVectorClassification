@@ -1,0 +1,2 @@
+[console_scripts]
+garden-weeding = garden_weeding.main:main

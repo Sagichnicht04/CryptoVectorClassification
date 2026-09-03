@@ -23,17 +23,17 @@ from pathlib import Path
 import pytest
 
 
-_MAIN_PATH = (
-    Path(__file__).resolve().parent.parent / "garden_weeding" / "main.py"
-)
+# The src/ directory must be on PYTHONPATH so `python -m garden_weeding` can
+# find the package when running under the test subprocess.
+_SRC_DIR = str(Path(__file__).resolve().parent.parent)
 
 
 def _run_main(*extra_args, tmp_path: Path):
-    """Invoke main.py in a subprocess with everything pointed at tmp_path."""
+    """Invoke garden_weeding via ``python -m`` in a subprocess."""
+    env = {**__import__("os").environ, "PYTHONPATH": _SRC_DIR}
     return subprocess.run(
         [
-            sys.executable,
-            str(_MAIN_PATH),
+            sys.executable, "-m", "garden_weeding",
             "--cache-dir", str(tmp_path / "cache"),
             "--classifier-file", str(tmp_path / "classifier.pkl"),
             "--target", str(tmp_path / "target"),
@@ -45,6 +45,7 @@ def _run_main(*extra_args, tmp_path: Path):
         capture_output=True,
         text=True,
         timeout=30,
+        env=env,
     )
 
 
@@ -75,11 +76,13 @@ def test_main_rejects_conflicting_threshold_flags(tmp_path):
 
 def test_main_help_flag_exits_zero(tmp_path):
     """`--help` is handled by argparse and exits 0 without heavy work."""
+    env = {**__import__("os").environ, "PYTHONPATH": _SRC_DIR}
     result = subprocess.run(
-        [sys.executable, str(_MAIN_PATH), "--help"],
+        [sys.executable, "-m", "garden_weeding", "--help"],
         capture_output=True,
         text=True,
         timeout=15,
+        env=env,
     )
     assert result.returncode == 0
     # argparse writes the help text to stdout.
