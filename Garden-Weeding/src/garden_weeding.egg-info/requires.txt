@@ -4,8 +4,6 @@ peft
 huggingface-hub
 scikit-learn
 numpy
-
-[dev]
 pytest>=7.0
 
 [quantization]

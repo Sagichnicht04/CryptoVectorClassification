@@ -11,15 +11,9 @@ Create a virtual environment, clone the repository and install with pip:
 ```bash
 python -m venv venv
 source venv/bin/activate
-git clone <repository-url>
-cd Garden-Weeding
-pip install .
-```
-
-For development (includes pytest):
-
-```bash
-pip install -e ".[dev]"
+git clone https://github.tools.sap/gardenlinux/garden-weeding.git
+cd garden-weeding
+pip install -e . #Important
 ```
 
 For 4-bit quantization support (will fail if no NVIDIA GPU is installed):
@@ -39,6 +33,7 @@ The tool presented here follows this principle. It uses a large language model t
 2. **Embedding** -- Every chunk is passed through a transformer model (default: `Alibaba-NLP/gte-Qwen2-1.5B-instruct`) to produce a vector embedding. GPU is used automatically when available, with a CPU fallback.
 3. **Classification** -- A pre-trained Random Forest classifier assigns a cryptographic probability to each chunk.
 4. **Thresholding** -- If any chunk in a file exceeds the configured threshold, the file is flagged as cryptographic.
+5. **Result** -- The tool stores all results in a parsable `garden-weeding-results.json` file.
 
 Embeddings are cached on disk (keyed by file content hash and model configuration), so re-running the tool on an unchanged codebase is nearly instant.
 
@@ -79,8 +74,11 @@ garden-weeding --target ./src --rough-threshold --include-non-c-files
 # Re-embed everything from scratch with 4-bit quantization
 garden-weeding --target ./src --no-cache --use-quantization
 
-# Train a new classifier from labelled data
-garden-weeding --train --positives ./crypto --negatives ./non-crypto
+# Train a new classifier from labelled data for another embedding model
+garden-weeding --train --positives src/training_data/positives/ --negatives src/training_data/negatives/ --embedding-model Salesforce/codet5-small --token-size 512 --chunk-overlap-size 64
+
+# Use another embedding model after training the classifier
+garden-weeding --target ./src --embedding-model Salesforce/codet5-small --token-size 512 --chunk-overlap-size 64
 ```
 
 ### Full option reference
@@ -101,6 +99,7 @@ Run `garden-weeding --help` to see all options. The highlights:
 | `--no-cache` | Ignore existing cache; re-embed all files |
 | `--only-cache` | Only classify already-cached files |
 | `--reset-cache` | Wipe cache before starting |
+| `--file-size-limit` | maximum size of a file (bytes) to be included in the analysis |
 | `--cache-dir DIR` | Cache directory (default: `~/.cache/garden_weeding/`) |
 | `--embedding-model-name NAME` | HuggingFace model to use for embedding |
 | `--token-size INT` | Max tokens per chunk (default: `4096`) |
@@ -150,31 +149,16 @@ characters like `^`, `$`, `[`, `]`, `+`, `|`):
 
 The exclusion list applies to both new files discovered during a scan and files already present in the cache.
 
-### Output
-
-The classification report is printed to **stdout**. Progress messages and logs
-go to **stderr**, so the report can be piped or redirected cleanly:
-
-```bash
-garden-weeding --target ./src > report.txt
-```
-
-Use `--verbose` for detailed debug output including per-file chunk
-probabilities, full configuration, and device information.
 
 ## Caching
 
 Embeddings are expensive to compute. Garden-Weeding caches them on disk so
 unchanged files are not re-embedded across runs.
 
-- Cache files are stored in `~/.cache/garden_weeding/` by default
-  (`--cache-dir` to change).
-- The cache is namespaced by model configuration (model name, token size,
-  chunk overlap), so switching models creates a separate cache.
-- File identity is determined by MD5 content hash -- if a file's contents
-  change, it will be re-embedded automatically.
-- Only files under the current `--target` directory are loaded from cache.
-  Files cached from previous runs against different directories are not mixed
+- Cache files are stored in `~/.cache/garden_weeding/` by default (`--cache-dir` to change).
+- The cache is namespaced by model configuration (model name, token size, chunk overlap), so switching models creates a separate cache.
+- File identity is determined by MD5 content hash -- if a file's contents change, it will be re-embedded automatically.
+- Only files under the current `--target` directory are loaded from cache. Files cached from previous runs against different directories are not mixed
   in.
 
 ## Training
@@ -188,14 +172,10 @@ garden-weeding --train \
     --negatives ./labelled/non-crypto
 ```
 
-This embeds all training files, trains a Random Forest classifier (200 trees,
-max depth 12), and saves it as a pickle file at the path given by
-`--classifier-file`. The new classifier can then be used for all subsequent
-classification runs.
+This embeds all training files, trains a Random Forest classifier (200 trees, max depth 12), and saves it as a pickle file into the classifier folder. The new classifier can then be used for all subsequent classification runs with the embedding model specified.
 
 Training data can use any file extension if you pass `--include-non-c-files`.
 
-Fun-Fact: The tool is not limited to classify cryptographic or non-cryptographic code only. In theory, every classification (like "happy emotion" or "sad emotion") that can be represented by text can be classified using this architecture. Just put the class you want to detect into the positive folder and text from the other class into the negative folder.  
 
 ## Running tests
 
@@ -221,28 +201,3 @@ The test suite covers all modules:
 | `evaluate-test.py` | `evaluate.py` | Threshold sweeping, metrics, HTML report generation |
 | `main-test.py` | `main.py` | CLI argument validation, `--help` output, error handling |
 | `process_file-test.py` | `process_file.py` | Embedding pooling strategies, environment setup |
-
-## Project structure
-
-```
-Garden-Weeding/
-  pyproject.toml                   Build configuration and dependencies
-  README.md
-  src/
-    garden_weeding/
-      __init__.py                  Package entry point, exposes main()
-      __main__.py                  Enables `python -m garden_weeding`
-      main.py                      CLI argument parsing, pipeline orchestration
-      cache.py                     File hashing, embedding cache, exclusion list
-      classifier.py                Random Forest classifier (load, predict, train)
-      process_file.py              Transformer-based embedding engine
-      evaluate.py                  Model evaluation and HTML report generation
-      classifier.pkl               Pre-trained Random Forest model
-      train.py                     (placeholder)
-    tests/
-      cache-test.py
-      classifier-test.py
-      evaluate-test.py
-      main-test.py
-      process_file-test.py
-```

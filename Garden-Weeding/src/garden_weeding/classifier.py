@@ -16,12 +16,15 @@ class RandomForestClassifier:
     def __init__(self, args, path):
         self.model = None
         self.path = path
-        if os.path.exists(self.path):            
+        if os.path.exists(self.path):  
+            log.debug(f"Loading classifier from {path}")
             try:
                 with open(self.path, "rb") as f:
                     self.model = pickle.load(f)
             except:
                 raise RuntimeError("Error loading RandomForestClassifier")
+        else:
+            log.debug(f"Classifier does not exist: {path}")
         
     def predict_proba(self, embeddings: list) -> np.ndarray:
         """

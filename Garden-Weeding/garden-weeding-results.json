@@ -1,15 +1,309 @@
 {
   "metadata": {
     "tool": "garden-weeding",
-    "generated_at": "2026-09-04T13:52:43.424359+00:00",
-    "target": "algo",
+    "generated_at": "2026-09-04T15:51:35.149832+00:00",
+    "target": "./src",
     "threshold": 0.22,
-    "embedding_model_name": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
-    "token_size": 4096,
-    "chunk_overlap_size": 512,
-    "files_scanned": 0,
-    "crypto_count": 0,
-    "non_crypto_count": 0
+    "embedding_model_name": "microsoft/codebert-base",
+    "token_size": 512,
+    "chunk_overlap_size": 64,
+    "files_scanned": 32,
+    "crypto_count": 5,
+    "non_crypto_count": 27
   },
-  "files": []
+  "files": [
+    {
+      "path": "src/training_data/positives/novel_crypto/test2_anonymized_math_rc4.cpp",
+      "is_crypto": true,
+      "max_confidence": 0.898628,
+      "num_chunks": 2,
+      "chunk_probabilities": [
+        0.898628,
+        0.7216
+      ]
+    },
+    {
+      "path": "src/training_data/positives/RC4/davidgfnet_whatsapp-purple_rc4.cc",
+      "is_crypto": true,
+      "max_confidence": 0.86626,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.86626
+      ]
+    },
+    {
+      "path": "src/training_data/positives/dragonslayerv2_Competitive-Programming_rc4PRG.cpp",
+      "is_crypto": true,
+      "max_confidence": 0.830041,
+      "num_chunks": 2,
+      "chunk_probabilities": [
+        0.617576,
+        0.830041
+      ]
+    },
+    {
+      "path": "src/training_data/positives/crypto/cpp/Ed25519/OperatorFoundation_Elligator_ge_p1p1_to_p2.cc",
+      "is_crypto": true,
+      "max_confidence": 0.818928,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.818928
+      ]
+    },
+    {
+      "path": "src/training_data/positives/RSA/Prathima-chowdary_CSA5147-Cryptography-_25.c",
+      "is_crypto": true,
+      "max_confidence": 0.667613,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.667613
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/fingergit_airplay2-win_keypair.c",
+      "is_crypto": false,
+      "max_confidence": 0.17442,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.17442
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/non_crypto_dataset/HashSource_hashsource_antminer_Ex_blake2s@232E30.c",
+      "is_crypto": false,
+      "max_confidence": 0.174375,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.174375
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/non_crypto/non_crypto_dataset/test2_only_comments_rc4.cpp",
+      "is_crypto": false,
+      "max_confidence": 0.15388,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.15388
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/janmojzis_tinyssh_haslib1305.c",
+      "is_crypto": false,
+      "max_confidence": 0.152136,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.152136
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/envoyproxy_envoy_SSL_get_signature_algorithm_digest.cc",
+      "is_crypto": false,
+      "max_confidence": 0.131145,
+      "num_chunks": 2,
+      "chunk_probabilities": [
+        0.030094,
+        0.131145
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/mpg_p256-m_entry.c",
+      "is_crypto": false,
+      "max_confidence": 0.127631,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.127631
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/gaspardle_putty_sshecdsag.c",
+      "is_crypto": false,
+      "max_confidence": 0.127145,
+      "num_chunks": 2,
+      "chunk_probabilities": [
+        0.063581,
+        0.127145
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/Joey35233_SQARDatabase_MD5.cpp",
+      "is_crypto": false,
+      "max_confidence": 0.122788,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.122788
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/UlordChain_node-multi-hashing_blake2s256.c",
+      "is_crypto": false,
+      "max_confidence": 0.110279,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.110279
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/fboulnois_pg-scram_main.c",
+      "is_crypto": false,
+      "max_confidence": 0.109742,
+      "num_chunks": 2,
+      "chunk_probabilities": [
+        0.052163,
+        0.109742
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/non_crypto_dataset/modafufu_zk-snarks-demo2_ecdh.cpp",
+      "is_crypto": false,
+      "max_confidence": 0.102613,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.102613
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/non_crypto_dataset/udbhav96_Leet-Code_7.c",
+      "is_crypto": false,
+      "max_confidence": 0.097976,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.097976
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/drichardson_putty_sshecdsag.c",
+      "is_crypto": false,
+      "max_confidence": 0.090098,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.090098
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/tropicsquare_libtropic_lt_trezor_crypto_x25519.c",
+      "is_crypto": false,
+      "max_confidence": 0.085349,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.085349
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/skiptools_skip-ltc_x25519_make_key.c",
+      "is_crypto": false,
+      "max_confidence": 0.077286,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.077286
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/wuzhouhui_unp_1.c",
+      "is_crypto": false,
+      "max_confidence": 0.077031,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.077031
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/Nikita11042001_SS_LAB_2.c",
+      "is_crypto": false,
+      "max_confidence": 0.072272,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.072272
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/non_crypto_dataset/Lucifer-ww_Coding-Notes_.cpp",
+      "is_crypto": false,
+      "max_confidence": 0.068064,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.068064
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/deepin-community_bobcat_ecdh4.cc",
+      "is_crypto": false,
+      "max_confidence": 0.066149,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.066149
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/Hasan-Jawaheri_quic-tor_chacha20_poly1305_encrypter_openssl.cc",
+      "is_crypto": false,
+      "max_confidence": 0.064328,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.064328
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/non_crypto_dataset/XopMC_Mnemonic_CPP_seed.c",
+      "is_crypto": false,
+      "max_confidence": 0.062197,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.062197
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/non_crypto_dataset/CodeShark_secp256k1_bench.cpp",
+      "is_crypto": false,
+      "max_confidence": 0.060111,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.060111
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/non_crypto_dataset/rocuevas9511_OS_h.c",
+      "is_crypto": false,
+      "max_confidence": 0.055223,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.055223
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/non_crypto_dataset/shivam-65_ss-assignments-2_7.c",
+      "is_crypto": false,
+      "max_confidence": 0.053971,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.053971
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/ulyildiz_42-Minishell_a.c",
+      "is_crypto": false,
+      "max_confidence": 0.047458,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.047458
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/discarded_dataset/TunSafe_TunSafe_tunsafe_amalgam.cpp",
+      "is_crypto": false,
+      "max_confidence": 0.034568,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.034568
+      ]
+    },
+    {
+      "path": "src/training_data/negatives/non_crypto_dataset/SpaRcle-Studio_Innertia_main.cpp",
+      "is_crypto": false,
+      "max_confidence": 0.029127,
+      "num_chunks": 1,
+      "chunk_probabilities": [
+        0.029127
+      ]
+    }
+  ]
 }
