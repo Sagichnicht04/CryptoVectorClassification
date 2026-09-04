@@ -13,24 +13,22 @@ class RandomForestClassifier:
     Label convention:  1 = crypto,  0 = non-crypto.
     """
 
-    def __init__(self, args):
+    def __init__(self, args, path):
         self.model = None
-        self.path = args.classifier_file
-        if not os.path.exists(self.path):
-            raise RuntimeError("RandomForestClassifier not found")
-        
-        try:
-            with open(self.path, "rb") as f:
-                self.model = pickle.load(f)
-        except:
-            raise RuntimeError("Error loading RandomForestClassifier")
+        self.path = path
+        if os.path.exists(self.path):            
+            try:
+                with open(self.path, "rb") as f:
+                    self.model = pickle.load(f)
+            except:
+                raise RuntimeError("Error loading RandomForestClassifier")
         
     def predict_proba(self, embeddings: list) -> np.ndarray:
         """
         Returns the class probabilities for each chunk embedding.
         """
         if self.model is None:
-            raise RuntimeError("RandomForestClassifier has not been trained/loaded.")
+            raise RuntimeError("RandomForestClassifier has not been trained/loaded. If you try to use a custom embedding model, run with --train first.")
         
         if not embeddings:
             return np.array([])

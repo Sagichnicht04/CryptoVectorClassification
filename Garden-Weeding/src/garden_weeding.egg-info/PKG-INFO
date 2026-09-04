@@ -3,6 +3,7 @@ Name: garden-weeding
 Version: 0.0.1
 Summary: Detect cryptographic implementations in C/C++ source files
 Requires-Python: >=3.10
+License-File: LICENSE
 Requires-Dist: torch
 Requires-Dist: transformers
 Requires-Dist: peft
@@ -13,3 +14,4 @@ Provides-Extra: dev
 Requires-Dist: pytest>=7.0; extra == "dev"
 Provides-Extra: quantization
 Requires-Dist: bitsandbytes; extra == "quantization"
+Dynamic: license-file

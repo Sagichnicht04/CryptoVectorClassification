@@ -1,12 +1,8 @@
 import os
-import numpy as np
 import json
 import torch
-import torch.amp
 from transformers import AutoTokenizer, AutoModel, BitsAndBytesConfig
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, PeftModel
-import torch.nn as nn
-import torch.optim as optim
 from huggingface_hub import snapshot_download
 import logging
 
@@ -46,7 +42,6 @@ class file_processor:
                 quantization_config = None
 
             load_kwargs = {
-                "use_safetensors": True,
                 "quantization_config": quantization_config,
             }
             if self.USE_GPU:
@@ -77,7 +72,6 @@ class file_processor:
                 quantization_config = None
 
             load_kwargs = {
-                "use_safetensors": True,
                 "quantization_config": quantization_config,
             }
             if self.USE_GPU:

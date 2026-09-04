@@ -41,6 +41,16 @@ def _make_args(classifier_file: Path):
     return argparse.Namespace(classifier_file=str(classifier_file))
 
 
+def _make_classifier(classifier_file: Path):
+    """Construct the classifier under the current ``(args, path)`` contract.
+
+    ``args`` is currently unused by ``__init__`` (the on-disk location comes
+    from the explicit ``path`` argument), but we still pass a populated
+    Namespace so the test keeps working if that ever changes back.
+    """
+    return RandomForestClassifier(_make_args(classifier_file), str(classifier_file))
+
+
 @pytest.fixture
 def rng() -> np.random.Generator:
     """Deterministic random generator so training results are reproducible."""
@@ -78,20 +88,14 @@ def trained_classifier_file(tmp_path, synthetic_training_data):
     """
     Fit a small Random Forest and persist it under tmp_path.
 
-    NOTE about the "chicken-and-egg" flaw in classifier.py's __init__:
-    the constructor RAISES if the file does not exist, so we can only
-    construct-and-then-train if the file already exists. We work around
-    this by pre-creating a placeholder file (matching production usage
-    where `--classifier-file` points at a previously-trained model).
+    Under the current ``__init__(self, args, path)`` contract the constructor
+    no longer requires the file to exist beforehand (a missing file simply
+    leaves ``self.model`` as ``None``), so we can construct directly against
+    the target path and let ``.train()`` create/overwrite it.
     """
     classifier_file = tmp_path / "classifier.pkl"
-    # Placeholder so __init__ passes the existence check. Its contents get
-    # loaded into self.model but immediately overwritten by .train().
-    with open(classifier_file, "wb") as f:
-        pickle.dump({"placeholder": True}, f)
 
-    args = _make_args(classifier_file)
-    clf = RandomForestClassifier(args)
+    clf = _make_classifier(classifier_file)
     crypto, non_crypto = synthetic_training_data
     clf.train(crypto, non_crypto)
 
@@ -101,19 +105,21 @@ def trained_classifier_file(tmp_path, synthetic_training_data):
 # --------------------------------------------------------------------------- #
 # __init__ tests
 # --------------------------------------------------------------------------- #
-def test_init_raises_when_file_missing(tmp_path):
-    args = _make_args(tmp_path / "does_not_exist.pkl")
-    with pytest.raises(RuntimeError, match="not found"):
-        RandomForestClassifier(args)
+def test_init_missing_file_leaves_model_unloaded(tmp_path):
+    """A missing classifier file is not an error at construction time; the
+    model is simply left unloaded (``None``). Using it then raises."""
+    clf = _make_classifier(tmp_path / "does_not_exist.pkl")
+    assert clf.model is None
+    with pytest.raises(RuntimeError, match="has not been trained/loaded"):
+        clf.predict_proba([np.zeros(8)])
 
 
 def test_init_raises_on_corrupt_pickle(tmp_path):
     classifier_file = tmp_path / "corrupt.pkl"
     classifier_file.write_bytes(b"this is definitely not a pickle stream")
 
-    args = _make_args(classifier_file)
     with pytest.raises(RuntimeError, match="Error loading"):
-        RandomForestClassifier(args)
+        _make_classifier(classifier_file)
 
 
 def test_init_loads_valid_pickle(tmp_path):
@@ -121,8 +127,7 @@ def test_init_loads_valid_pickle(tmp_path):
     with open(classifier_file, "wb") as f:
         pickle.dump({"marker": 123}, f)
 
-    args = _make_args(classifier_file)
-    clf = RandomForestClassifier(args)
+    clf = _make_classifier(classifier_file)
     assert clf.model == {"marker": 123}
 
 
@@ -130,7 +135,7 @@ def test_init_loads_valid_pickle(tmp_path):
 # train() -- end-to-end fit and persistence
 # --------------------------------------------------------------------------- #
 def test_train_persists_classifier_to_disk(trained_classifier_file):
-    """After training, the pickle at args.classifier_file must contain a
+    """After training, the pickle must contain a
     fitted sklearn RandomForestClassifier (not the placeholder we seeded)."""
     from sklearn.ensemble import RandomForestClassifier as _SkRFC
 
@@ -148,8 +153,7 @@ def test_train_produces_classifier_that_separates_synthetic_data(
 ):
     """The trained model should classify the synthetic training points
     correctly: crypto -> high probability, non-crypto -> low probability."""
-    args = _make_args(trained_classifier_file)
-    clf = RandomForestClassifier(args)
+    clf = _make_classifier(trained_classifier_file)
 
     crypto, non_crypto = synthetic_training_data
     crypto_flat = [emb for file_embs in crypto for emb in file_embs]
@@ -175,8 +179,7 @@ def test_train_produces_classifier_that_separates_synthetic_data(
 def test_predict_proba_returns_one_probability_per_input(
     trained_classifier_file, synthetic_training_data
 ):
-    args = _make_args(trained_classifier_file)
-    clf = RandomForestClassifier(args)
+    clf = _make_classifier(trained_classifier_file)
 
     crypto, _ = synthetic_training_data
     flat = [emb for file_embs in crypto for emb in file_embs]
@@ -186,8 +189,7 @@ def test_predict_proba_returns_one_probability_per_input(
 
 
 def test_predict_proba_empty_input_returns_empty_ndarray(trained_classifier_file):
-    args = _make_args(trained_classifier_file)
-    clf = RandomForestClassifier(args)
+    clf = _make_classifier(trained_classifier_file)
 
     result = clf.predict_proba([])
     assert isinstance(result, np.ndarray)

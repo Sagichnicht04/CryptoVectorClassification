@@ -326,15 +326,59 @@ def test_update_cache_persists_pickle_and_hashes(workspace):
     assert set(cache.get_embedded_files_hashes(args)) == {"aa", "bb"}
 
 
-def test_update_cache_overwrites_previous_contents(workspace):
+def test_update_cache_merges_into_existing_contents(workspace):
+    """update_cache must MERGE new embeddings into the existing cache rather
+    than replacing it wholesale.
+
+    Replacing wholesale would destroy embeddings for files outside the current
+    --target (data loss).  The new contract keeps everything and layers the
+    new entries on top.
+    """
     args = _make_args(workspace["cache_dir"], workspace["target"])
     cache.init_cache(args)
 
     cache.update_cache(args, {"aa": {"embedding": [1]}})
     cache.update_cache(args, {"bb": {"embedding": [2]}})
 
-    assert cache.get_embedded_files(args) == {"bb": {"embedding": [2]}}
-    assert cache.get_embedded_files_hashes(args) == ["bb"]
+    assert cache.get_embedded_files(args) == {
+        "aa": {"embedding": [1]},
+        "bb": {"embedding": [2]},
+    }
+    assert set(cache.get_embedded_files_hashes(args)) == {"aa", "bb"}
+
+
+def test_update_cache_same_hash_refreshes_path(workspace):
+    """When an incoming hash already exists, its stored path is refreshed
+    (requirement 2)."""
+    args = _make_args(workspace["cache_dir"], workspace["target"])
+    cache.init_cache(args)
+
+    old_path = str(workspace["target"] / "a.c")
+    new_path = str(workspace["target"] / "sub" / "a_moved.c")
+
+    cache.update_cache(args, {"aa": {"embedding": [1], "path": old_path}})
+    cache.update_cache(args, {"aa": {"embedding": [1], "path": new_path}})
+
+    loaded = cache.get_embedded_files(args)
+    assert loaded["aa"]["path"] == new_path
+    assert len(loaded) == 1
+
+
+def test_update_cache_evicts_stale_hash_for_reused_path(workspace):
+    """A cached entry whose path is re-embedded under a *new* hash is evicted
+    (requirement 3): a path must never map to two different hashes."""
+    args = _make_args(workspace["cache_dir"], workspace["target"])
+    cache.init_cache(args)
+
+    shared_path = str(workspace["target"] / "a.c")
+
+    cache.update_cache(args, {"oldhash": {"embedding": [1], "path": shared_path}})
+    cache.update_cache(args, {"newhash": {"embedding": [2], "path": shared_path}})
+
+    loaded = cache.get_embedded_files(args)
+    assert "oldhash" not in loaded
+    assert "newhash" in loaded
+    assert len(loaded) == 1
 
 
 
@@ -424,8 +468,9 @@ def test_load_uncached_hashes_skips_already_cached(workspace):
     a_c_hash = cache.get_md5_hash(str(a_c))
 
     cache.init_cache(args)
-    hashes_file = _hashes_json(workspace["cache_dir"], args)
-    hashes_file.write_text(json.dumps([a_c_hash]))
+    # Seed the cache (the source of truth is the pickle, not just the JSON
+    # index) with an already-embedded entry for a.c.
+    cache.update_cache(args, {a_c_hash: {"embedding": [1], "path": str(a_c)}})
 
     result = cache.load_uncached_hashes(args)
 
@@ -471,6 +516,137 @@ def test_load_uncached_hashes_only_cache_flag_returns_empty(workspace):
         workspace["cache_dir"], workspace["target"], only_cache=True
     )
     assert cache.load_uncached_hashes(args) == {}
+
+# --------------------------------------------------------------------------- #
+# End-to-end reconciliation: the four requirements, exercised through the
+# real load_uncached_hashes / update_cache / get_embedded_files cycle.
+# --------------------------------------------------------------------------- #
+def _embed_uncached(args):
+    """Simulate main.py's embedding loop without a real model.
+
+    Reconciles the cache, produces a fake embedding for each uncached file,
+    persists them via update_cache, and returns the reconciled uncached dict.
+    """
+    uncached = cache.load_uncached_hashes(args)
+    new_embeddings = {}
+    for file_hash, path in uncached.items():
+        new_embeddings[file_hash] = {"embedding": [[0.0]], "path": path}
+    if new_embeddings:
+        cache.update_cache(args, new_embeddings)
+    return uncached
+
+
+class TestReconciliationRequirements:
+    """The four caching invariants requested by the user."""
+
+    def test_req1_known_hash_is_not_reembedded(self, workspace):
+        """Requirement 1: an already-cached content hash is never re-embedded."""
+        args = _make_args(workspace["cache_dir"], workspace["target"])
+
+        first = _embed_uncached(args)
+        assert first  # something was embedded
+
+        # Second pass with unchanged files: nothing needs embedding.
+        second = cache.load_uncached_hashes(args)
+        assert second == {}
+
+    def test_req2_moved_file_updates_path_without_reembedding(self, workspace):
+        """Requirement 2: same content at a new path -> path is rewritten,
+        no re-embedding."""
+        args = _make_args(workspace["cache_dir"], workspace["target"])
+        _embed_uncached(args)
+
+        a_c = workspace["target"] / "a.c"
+        a_hash = cache.get_md5_hash(str(a_c))
+
+        moved = workspace["target"] / "sub" / "a_moved.c"
+        moved.write_bytes(a_c.read_bytes())
+        a_c.unlink()
+
+        uncached = cache.load_uncached_hashes(args)
+
+        assert a_hash not in uncached
+        loaded = cache.get_embedded_files(args)
+        assert loaded[a_hash]["path"] == str(moved)
+
+    def test_req3_changed_content_evicts_stale_hash_and_reembeds(self, workspace):
+        """Requirement 3: a path whose content changed gets its stale hash
+        evicted and is re-embedded under the new hash."""
+        args = _make_args(workspace["cache_dir"], workspace["target"])
+        _embed_uncached(args)
+
+        a_c = workspace["target"] / "a.c"
+        old_hash = cache.get_md5_hash(str(a_c))
+
+        a_c.write_bytes(b"int main(void) { return 42; } // changed\n")
+        new_hash = cache.get_md5_hash(str(a_c))
+        assert new_hash != old_hash
+
+        uncached = cache.load_uncached_hashes(args)
+
+        assert uncached.get(new_hash) == str(a_c)
+        loaded_after_reconcile = cache.get_embedded_files(args)
+        assert old_hash not in loaded_after_reconcile
+
+        cache.update_cache(args, {new_hash: {"embedding": [[0.0]], "path": str(a_c)}})
+        final = cache.get_embedded_files(args)
+        a_c_entries = [h for h, e in final.items() if e.get("path") == str(a_c)]
+        assert a_c_entries == [new_hash]
+    def test_req4_new_file_is_cached_and_used(self, workspace):
+        """Requirement 4: an uncached file gets embedded and then reused."""
+        args = _make_args(workspace["cache_dir"], workspace["target"])
+        _embed_uncached(args)
+
+        new_file = workspace["target"] / "sub" / "e.c"
+        new_file.write_bytes(b"int e(void) { return 5; }\n")
+        new_hash = cache.get_md5_hash(str(new_file))
+
+        uncached = cache.load_uncached_hashes(args)
+        assert uncached.get(new_hash) == str(new_file)
+
+        cache.update_cache(args, {new_hash: {"embedding": [[0.0]], "path": str(new_file)}})
+
+        assert new_hash in cache.get_embedded_files(args)
+        assert cache.load_uncached_hashes(args) == {}
+
+    def test_no_cache_flag_bypasses_reconciliation(self, workspace):
+        """--no-cache: everything is uncached and the on-disk cache is left
+        untouched (no path rewrites / evictions persisted)."""
+        seed = _make_args(workspace["cache_dir"], workspace["target"])
+        _embed_uncached(seed)
+        before = cache.get_embedded_files(seed)
+
+        args = _make_args(
+            workspace["cache_dir"], workspace["target"], no_cache=True
+        )
+        uncached = cache.load_uncached_hashes(args)
+
+        assert set(uncached.values()) == _c_cpp_source_paths(workspace)
+        assert cache.get_embedded_files(seed) == before
+
+    def test_only_cache_flag_reconciles_paths_but_embeds_nothing(self, workspace):
+        """--only-cache: no new embedding is scheduled, yet path rewrites for
+        already-cached files are still applied."""
+        args = _make_args(workspace["cache_dir"], workspace["target"])
+        _embed_uncached(args)
+
+        a_c = workspace["target"] / "a.c"
+        a_hash = cache.get_md5_hash(str(a_c))
+        moved = workspace["target"] / "sub" / "a_moved.c"
+        moved.write_bytes(a_c.read_bytes())
+        a_c.unlink()
+
+        only = _make_args(
+            workspace["cache_dir"], workspace["target"], only_cache=True
+        )
+        uncached = cache.load_uncached_hashes(only)
+
+        assert uncached == {}
+        assert cache.get_embedded_files(only)[a_hash]["path"] == str(moved)
+
+
+
+
 
 
 def test_load_uncached_hashes_train_mode_walks_positives_and_negatives(workspace):
@@ -666,6 +842,41 @@ class TestIsExcluded:
             str(tmp_path / "src" / "lib.c"), str(tmp_path), patterns
         )
 
+    def test_trailing_slash_excludes_directory_subtree(self, tmp_path):
+        """A gitignore-style 'dir/' pattern excludes the directory and its
+        entire subtree, at any depth."""
+        patterns = [cache._compile_pattern(".git/")]
+        # Files directly inside and nested under .git are excluded.
+        assert cache.is_excluded(
+            str(tmp_path / ".git" / "AES.c"), str(tmp_path), patterns
+        )
+        assert cache.is_excluded(
+            str(tmp_path / ".git" / "hooks" / "pre.c"), str(tmp_path), patterns
+        )
+        # A .git directory nested deeper in the tree is matched too.
+        assert cache.is_excluded(
+            str(tmp_path / "src" / ".git" / "AES.c"), str(tmp_path), patterns
+        )
+        # Unrelated files are kept.
+        assert not cache.is_excluded(
+            str(tmp_path / "src" / "main.c"), str(tmp_path), patterns
+        )
+        # A *file* named similarly (".gitignore") is not the directory.
+        assert not cache.is_excluded(
+            str(tmp_path / ".gitignore"), str(tmp_path), patterns
+        )
+
+    def test_trailing_slash_with_internal_slash_is_anchored(self, tmp_path):
+        """'src/vendor/' has an internal separator, so it is anchored to the
+        relative path (only matches at that exact location)."""
+        patterns = [cache._compile_pattern("src/vendor/")]
+        assert cache.is_excluded(
+            str(tmp_path / "src" / "vendor" / "x.c"), str(tmp_path), patterns
+        )
+        assert not cache.is_excluded(
+            str(tmp_path / "a" / "src" / "vendor" / "x.c"), str(tmp_path), patterns
+        )
+
     def test_regex_pattern(self, tmp_path):
         patterns = [cache._compile_pattern(r"^test[0-9]+\.c$")]
         assert cache.is_excluded(
@@ -728,6 +939,48 @@ def test_load_uncached_hashes_excludes_directory_glob(workspace):
         assert "/sub/" not in path and "\\sub\\" not in path
     # a.c and b.cpp remain; c.cc and d.cxx (in sub/) are excluded
     assert len(result) == 2
+
+
+def test_load_uncached_hashes_excludes_directory_trailing_slash(workspace):
+    """A gitignore-style 'sub/' pattern (trailing slash) should exclude the
+    whole 'sub' subtree, just like 'sub/*'."""
+    exclude_file = workspace["tmp_path"] / ".exclude"
+    exclude_file.write_text("sub/\n")
+
+    args = _make_args(
+        workspace["cache_dir"],
+        workspace["target"],
+        exclusion_list=exclude_file,
+    )
+    result = cache.load_uncached_hashes(args)
+
+    for path in result.values():
+        assert "/sub/" not in path and "\\sub\\" not in path
+    # a.c and b.cpp remain; c.cc and d.cxx (in sub/) are excluded
+    assert len(result) == 2
+
+
+def test_load_uncached_hashes_excludes_dotgit_dir_when_targeted(tmp_path):
+    """Reproduces the real-world case: scanning a directory that contains a
+    '.git' subdirectory, with '.git/' in the exclusion list, must drop every
+    file under '.git' while keeping the rest."""
+    cache_dir = tmp_path / "cache"
+    target = tmp_path / "algo"
+    (target / ".git" / "hooks").mkdir(parents=True)
+    (target / ".git" / "AES.c").write_bytes(b"int git_aes(void){return 0;}\n")
+    (target / ".git" / "hooks" / "pre.c").write_bytes(b"int hook(void){return 1;}\n")
+    (target / "main.c").write_bytes(b"int main(void){return 0;}\n")
+
+    exclude_file = tmp_path / ".exclude"
+    exclude_file.write_text(".git/\n")
+
+    args = _make_args(cache_dir, target, exclusion_list=exclude_file)
+    result = cache.load_uncached_hashes(args)
+
+    for path in result.values():
+        assert "/.git/" not in path and "\\.git\\" not in path
+    # Only main.c survives.
+    assert {Path(p).name for p in result.values()} == {"main.c"}
 
 
 def test_load_uncached_hashes_excludes_with_regex(workspace):
@@ -1045,17 +1298,17 @@ class TestExceedsFileSizeLimit:
 
     def test_small_file_under_limit(self, tmp_path):
         f = tmp_path / "small.c"
-        f.write_text("hello")  # 5 chars
+        f.write_text("hello")  # 5 bytes
         assert not cache.exceeds_file_size_limit(str(f), 10)
 
     def test_file_exactly_at_limit(self, tmp_path):
         f = tmp_path / "exact.c"
-        f.write_text("a" * 50)  # 50 chars
+        f.write_text("a" * 50)  # 50 bytes
         assert not cache.exceeds_file_size_limit(str(f), 50)
 
     def test_file_exceeds_limit(self, tmp_path):
         f = tmp_path / "big.c"
-        f.write_text("a" * 200)  # 200 chars
+        f.write_text("a" * 200)  # 200 bytes
         assert cache.exceeds_file_size_limit(str(f), 100)
 
     def test_limit_zero_disables_check(self, tmp_path):
@@ -1085,6 +1338,15 @@ class TestExceedsFileSizeLimit:
         f = tmp_path / "two.c"
         f.write_text("xy")
         assert cache.exceeds_file_size_limit(str(f), 1)
+
+    def test_multibyte_counts_bytes_not_chars(self, tmp_path):
+        # "é" is a single character but two bytes in UTF-8, so a 3-char /
+        # 6-byte file must be measured by its byte size (6), not char count.
+        f = tmp_path / "utf8.c"
+        f.write_text("ééé", encoding="utf-8")  # 3 chars, 6 bytes
+        assert f.stat().st_size == 6
+        assert not cache.exceeds_file_size_limit(str(f), 6)
+        assert cache.exceeds_file_size_limit(str(f), 3)
 
 
 # --------------------------------------------------------------------------- #

@@ -1,2 +1,4 @@
+classifier
 garden_weeding
 tests
+training_data

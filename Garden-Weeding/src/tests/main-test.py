@@ -35,7 +35,6 @@ def _run_main(*extra_args, tmp_path: Path):
         [
             sys.executable, "-m", "garden_weeding",
             "--cache-dir", str(tmp_path / "cache"),
-            "--classifier-file", str(tmp_path / "classifier.pkl"),
             "--target", str(tmp_path / "target"),
             "--positives", str(tmp_path / "positives"),
             "--negatives", str(tmp_path / "negatives"),

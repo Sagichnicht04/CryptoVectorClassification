@@ -1,9 +1,9 @@
+LICENSE
 README.md
 pyproject.toml
 src/garden_weeding/__init__.py
 src/garden_weeding/__main__.py
 src/garden_weeding/cache.py
-src/garden_weeding/classifier.pkl
 src/garden_weeding/classifier.py
 src/garden_weeding/evaluate.py
 src/garden_weeding/main.py

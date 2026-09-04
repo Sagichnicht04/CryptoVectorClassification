@@ -33,7 +33,7 @@ pip install -e ".[quantization]"
 
 Large language models can not only be applied for text generation. These models are also capable to take input text and transform it into a vectorized representation (embedding) which is basically a large array of numbers. Somewhere within these numbers lies the natural language meaning of the input text. While humans can not interpret these numbers by themselves, computers are experts at understanding numbers and identify patterns within them and match them to a specific class. 
 
-The tool presented here follows this principle. It uses a large language model to embed source code into a vector. Then, a random forest classifier analyzes these numbers and classifies whether the numbers appear to represent cryptographic code or non-cryptographic code. For a detailed expanation, feel free to take a look into my [bachelor thesis](../Bachelorarbeit.pdf) about this topic. 
+The tool presented here follows this principle. It uses a large language model to embed source code into a vector. Then, a random forest classifier analyzes these numbers and classifies whether the numbers appear to represent cryptographic code or non-cryptographic code. For a detailed expanation, feel free to take a look into my [bachelor thesis](../Bachelorarbeit.pdf)(PLEASE FIX THIS LINK) about this topic. 
 
 1. **Tokenisation & chunking** -- Using large language models on simple consumer hardware often requires to chunk down source code files, as whole files can not be processed in a single step. Each source file is tokenised and split into overlapping chunks (configurable size and overlap).
 2. **Embedding** -- Every chunk is passed through a transformer model (default: `Alibaba-NLP/gte-Qwen2-1.5B-instruct`) to produce a vector embedding. GPU is used automatically when available, with a CPU fallback.
@@ -126,13 +126,19 @@ Two pattern styles are supported:
 # Skip everything under vendor/ directories at any depth
 **/vendor/*
 
+# Skip a whole directory and its subtree (trailing slash), at any depth
+.git/
+
 # Skip a specific subdirectory
 third_party/*
 ```
 
 Patterns without a `/` are matched against the filename only (so `*.txt`
 excludes text files at any depth). Patterns with a `/` are matched against the
-path relative to the target directory.
+path relative to the target directory. A pattern ending in `/` (e.g. `.git/`)
+excludes that directory and everything beneath it; a bare directory name
+matches at any depth, while one containing a `/` (e.g. `build/tmp/`) is anchored
+to the relative path.
 
 **Python regular expressions** (auto-detected when the pattern contains
 characters like `^`, `$`, `[`, `]`, `+`, `|`):

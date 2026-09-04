@@ -1,0 +1,15 @@
+{
+  "metadata": {
+    "tool": "garden-weeding",
+    "generated_at": "2026-09-04T13:52:43.424359+00:00",
+    "target": "algo",
+    "threshold": 0.22,
+    "embedding_model_name": "Alibaba-NLP/gte-Qwen2-1.5B-instruct",
+    "token_size": 4096,
+    "chunk_overlap_size": 512,
+    "files_scanned": 0,
+    "crypto_count": 0,
+    "non_crypto_count": 0
+  },
+  "files": []
+}

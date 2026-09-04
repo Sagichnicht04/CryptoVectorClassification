@@ -1,2 +1,4 @@
 activate.sh
 __pycache__
+*venv/
+*build/
